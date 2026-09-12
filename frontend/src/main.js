@@ -4,18 +4,48 @@
 // until there's a real reason to add one.
 
 // Top-down high-wing single silhouette (Cessna 182-like), replacing the earlier
-// CSS clip-path dart shape per Gerry's request 2026-09-13. Hand-drawn polygon
-// (viewBox 0 0 100 100, nose at y=0/tail at y=100, mirrored left/right around
-// x=50) rather than an external icon asset -- no build step, no new dependency,
+// CSS clip-path dart shape per Gerry's request 2026-09-13, then re-profiled twice
+// on live visual feedback: first for a wider fuselage/wing (a path Gerry supplied
+// directly), then again (2026-09-13) because that version still read as too
+// slender/high-aspect-ratio -- "looks more like a glider" -- so the wing chord,
+// fuselage width, and tail stabilizer were all thickened further below. Hand-drawn
+// path (viewBox 0 0 100 100, nose up/tail down, mirrored left/right around x=50)
+// rather than an external icon asset -- no build step, no new dependency,
 // consistent with this file's existing approach (see fixm.py-style preference for
 // small hand-rolled logic over pulling in a library for something this contained).
-// fill="currentColor" so upsertMarker can set color the same way as before, just
-// via .style.color on the wrapping div instead of .style.background.
-const AIRCRAFT_SVG = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <polygon fill="currentColor" points="
-    50,0 54,20 54,32 98,38 98,44 56,42 55,65 58,85 78,90 78,95 56,92 50,100
-    44,92 22,95 22,90 42,85 45,65 44,42 2,44 2,38 46,32 46,20
-  "/>
+// fill="currentColor" so upsertMarker can still set per-aircraft color via
+// .style.color on the wrapping div; stroke="#ffffff" is a contrast outline
+// against dark/busy basemaps.
+const AIRCRAFT_ICON_SIZE = 28; // keep in sync with .aircraft-dot's width/height in index.html
+const AIRCRAFT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${AIRCRAFT_ICON_SIZE}" height="${AIRCRAFT_ICON_SIZE}">
+  <path d="M 50,14
+           L 53,14
+           L 54,25
+           L 53.5,33
+           L 92,33
+           L 92,45
+           L 53,45
+           L 52.5,58
+           L 52.5,72
+           L 66,77
+           L 66,83
+           L 53,80
+           L 51,90
+           L 49,90
+           L 47,80
+           L 34,83
+           L 34,77
+           L 47.5,72
+           L 47.5,58
+           L 47,45
+           L 8,45
+           L 8,33
+           L 46.5,33
+           L 46,25 Z"
+        fill="currentColor"
+        stroke="#ffffff"
+        stroke-width="1"
+        stroke-linejoin="round"/>
 </svg>`;
 
 // Three no-API-key raster basemaps, all layers present at once with only one visible
