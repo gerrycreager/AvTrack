@@ -37,20 +37,26 @@
        this was reported as. Confirmed via getBoundingClientRect, not just computed
        style -- a computed-style-only check earlier had missed this entirely. */
     .aircraft-marker { position: relative; cursor: pointer; display: inline-block; }
-    /* Directional aircraft glyph (fixed 2026-09-13): was a plain circle, which JS
-       already tried to rotate by heading -- a no-op, since a circle looks identical
-       at any rotation angle. This dart/kite shape actually shows the rotation.
-       Points "up" (north) at heading_deg=0, matching the map's fixed north-up
-       orientation (bearing is never changed) and CSS rotate()'s 0deg = unrotated
-       convention -- so main.js's existing `rotate(${heading_deg}deg)` now works
-       correctly without needing any JS change. */
+    /* Directional aircraft glyph. Was a plain circle (rotation was a no-op -- a
+       circle looks identical at any angle), then a CSS clip-path dart/kite shape
+       (fixed 2026-09-13). Now an inline SVG (2026-09-13, per Gerry) tracing a
+       top-down high-wing single silhouette (Cessna 182-like: tapered fuselage,
+       full-span high wing ~1/3 back from the nose, smaller horizontal stabilizer at
+       the tail) -- built with the shape in main.js's AIRCRAFT_SVG so it can also
+       carry per-aircraft fill color. Points "up" (north) at heading_deg=0, matching
+       the map's fixed north-up orientation and CSS rotate()'s 0deg = unrotated
+       convention -- main.js's `rotate(${heading_deg}deg)` needs no change. */
     .aircraft-dot {
-      width: 24px; height: 24px;
-      clip-path: polygon(50% 0%, 85% 100%, 50% 76%, 15% 100%);
+      width: 28px; height: 28px;
+      display: block;
       filter: drop-shadow(0 0 1.5px white) drop-shadow(0 0 1.5px white);
     }
+    .aircraft-dot svg { width: 100%; height: 100%; display: block; }
     .aircraft-datablock {
-      position: absolute; left: 15px; top: -8px; font-size: 12pt; line-height: 1.25;
+      /* left offset needs clearance past the icon's own width (28px) plus a visible
+         gap -- previously 15px, which sat *inside* the icon's footprint at any size
+         above ~15px, crowding the two together. Found live 2026-09-13 per Gerry. */
+      position: absolute; left: 34px; top: -8px; font-size: 12pt; line-height: 1.25;
       color: #e8eaed; background: rgba(20, 24, 28, 0.78); padding: 2px 5px; border-radius: 3px;
       white-space: nowrap; pointer-events: none; font-family: ui-monospace, monospace;
     }

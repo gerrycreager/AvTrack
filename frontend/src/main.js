@@ -3,6 +3,21 @@
 // desktop client (REQUIREMENTS.md open question 8), so avoid framework lock-in here
 // until there's a real reason to add one.
 
+// Top-down high-wing single silhouette (Cessna 182-like), replacing the earlier
+// CSS clip-path dart shape per Gerry's request 2026-09-13. Hand-drawn polygon
+// (viewBox 0 0 100 100, nose at y=0/tail at y=100, mirrored left/right around
+// x=50) rather than an external icon asset -- no build step, no new dependency,
+// consistent with this file's existing approach (see fixm.py-style preference for
+// small hand-rolled logic over pulling in a library for something this contained).
+// fill="currentColor" so upsertMarker can set color the same way as before, just
+// via .style.color on the wrapping div instead of .style.background.
+const AIRCRAFT_SVG = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <polygon fill="currentColor" points="
+    50,0 54,20 54,32 98,38 98,44 56,42 55,65 58,85 78,90 78,95 56,92 50,100
+    44,92 22,95 22,90 42,85 45,65 44,42 2,44 2,38 46,32 46,20
+  "/>
+</svg>`;
+
 // Three no-API-key raster basemaps, all layers present at once with only one visible
 // at a time (toggled via #basemap-select) -- simpler than map.setStyle(), which tears
 // down and reloads everything including our own sources/layers below. Default is USGS
@@ -290,6 +305,7 @@ function upsertMarker(pos) {
     wrapper.className = "aircraft-marker";
     const dot = document.createElement("div");
     dot.className = "aircraft-dot";
+    dot.innerHTML = AIRCRAFT_SVG;
     const datablock = document.createElement("div");
     datablock.className = "aircraft-datablock";
     wrapper.appendChild(dot);
@@ -306,7 +322,7 @@ function upsertMarker(pos) {
     marker.setLngLat([pos.longitude, pos.latitude]);
   }
 
-  marker._dot.style.background = markerColor(pos.tail_number);
+  marker._dot.style.color = markerColor(pos.tail_number);
   marker._dot.style.transform = `rotate(${pos.heading_deg ?? 0}deg)`;
   // Datablock: callsign on one line, altitude/speed on the next -- ATC-style, per
   // Gerry's requirement that every airborne aircraft always shows this, not just on
