@@ -19,29 +19,29 @@
 const AIRCRAFT_ICON_SIZE = 28; // keep in sync with .aircraft-dot's width/height in index.html
 const AIRCRAFT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${AIRCRAFT_ICON_SIZE}" height="${AIRCRAFT_ICON_SIZE}">
   <path d="M 50,14
-           L 53,14
-           L 54,25
-           L 53.5,33
-           L 92,33
-           L 92,45
-           L 53,45
-           L 52.5,58
-           L 52.5,72
+           L 54.1,14
+           L 55.5,25
+           L 54.8,31
+           L 92,31
+           L 92,47.5
+           L 54.1,47.5
+           L 53.4,58
+           L 53.4,72
            L 66,77
            L 66,83
-           L 53,80
-           L 51,90
-           L 49,90
-           L 47,80
+           L 54.1,80
+           L 51.4,90
+           L 48.6,90
+           L 45.9,80
            L 34,83
            L 34,77
-           L 47.5,72
-           L 47.5,58
-           L 47,45
-           L 8,45
-           L 8,33
-           L 46.5,33
-           L 46,25 Z"
+           L 46.6,72
+           L 46.6,58
+           L 45.9,47.5
+           L 8,47.5
+           L 8,31
+           L 45.2,31
+           L 44.5,25 Z"
         fill="currentColor"
         stroke="#ffffff"
         stroke-width="1"
