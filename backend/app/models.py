@@ -100,6 +100,7 @@ class Airfield(Base):
 class PositionSource(str, enum.Enum):
     flightaware = "flightaware"
     swim = "swim"  # FAA SWIM/FDPS, via the r815 relay -- see REQUIREMENTS.md 3.5
+    adsb_lol = "adsb_lol"  # api.adsb.lol -- free/open raw ADS-B, see app/adsb/adsb_lol.py
     other = "other"
 
 

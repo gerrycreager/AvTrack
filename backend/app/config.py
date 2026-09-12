@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # instead. Value is a first guess, not a confirmed number from FlightAware/the
     # AeroAPI portal -- tune once that's known.
     adsb_inter_request_delay_seconds: float = 2.5
+    # adsb.lol is free/unauthenticated with no per-call cost (unlike AeroAPI), so this
+    # defaults on independently of adsb_polling_enabled -- see app/adsb/adsb_lol.py.
+    adsblol_polling_enabled: bool = True
+    adsblol_poll_interval_seconds: int = 30
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:

@@ -64,10 +64,11 @@ async def poll_once(provider: ADSBProvider) -> None:
         await session.commit()
 
 
-async def run_poll_loop(provider: ADSBProvider) -> None:
+async def run_poll_loop(provider: ADSBProvider, interval_seconds: int | None = None) -> None:
+    interval = interval_seconds if interval_seconds is not None else settings.adsb_poll_interval_seconds
     while True:
         try:
             await poll_once(provider)
         except Exception:
-            logger.exception("ADS-B poll cycle failed")
-        await asyncio.sleep(settings.adsb_poll_interval_seconds)
+            logger.exception("ADS-B poll cycle failed (%s)", provider.name)
+        await asyncio.sleep(interval)

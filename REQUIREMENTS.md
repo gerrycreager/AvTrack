@@ -463,6 +463,61 @@ is reusable as the Phase 2 server's schema — not thrown away.
     uncorrelated surveillance product exists that isn't in the public
     documentation), not a different SWIM subscription to chase.
 
+- **adsb.lol — free, working, coverage gap solved — added 2026-09-12**. Investigated
+  as an alternative after the SWIM/TAIS VFR-correlation gap above: since SFDPS/STDDS
+  both derive from ATC systems and only surface aircraft with a flight-plan/beacon-
+  code correlation, raw crowdsourced ADS-B (the ADS-B Exchange/airplanes.live
+  category of source — receiver network, no ATC involvement, no correlation
+  requirement) was the obvious thing to check.
+  - **airplanes.live itself is gated**, despite its own docs implying open access:
+    live-tested from both this host and r815, the real `api.airplanes.live` v2 API
+    returns `"Please contact us..."` for actual queries. A user forum thread found
+    separately corroborates this — full access appears reserved for feeders
+    (people running their own receiver, contributing data back) or manually
+    approved users, not a self-serve API like SCDS was.
+  - **`api.adsb.lol`, a sister project in the same aggregator lineage, is genuinely
+    open** — no signup, no API key, ODbL 1.0 licensed. Same v2 endpoint shape as
+    ADSBExchange-family APIs: `/v2/reg/{tail}`, `/v2/callsign/{cs}`,
+    `/v2/point/{lat}/{lon}/{radius}`, `/v2/mil`, etc. (Another sister site,
+    `api.adsb.one`, hit a Cloudflare IP block from this environment — not tested
+    further since adsb.lol already worked.)
+  - **Gotcha found live**: httpx's default User-Agent string gets a flat 403 from
+    this host's Cloudflare; curl's default UA (or any normal-looking one) passes.
+    Not a real auth/rate-limit issue — `app/adsb/adsb_lol.py` sets an explicit
+    browser-like `User-Agent` header to clear it.
+  - **Gotcha found live #2 — batch, don't loop**: `/v2/reg/` accepts a
+    comma-separated list of registrations and returns all matches in one response.
+    An initial implementation called it once per tracked tail (mirroring
+    `flightaware.py`'s per-tail pattern) and hit a hard, immediate rate-limit wall
+    (429s) after just ~2 calls even at ~1s spacing — adsb.lol's real limit is
+    undocumented ("dynamic based on environment load", no fixed number, no
+    `Retry-After`/`X-RateLimit-*` headers to key off) and apparently much stricter
+    than per-request pacing can work around. Rewritten to issue **one bulk request
+    per poll cycle** for the whole tracked fleet instead — confirmed this fully
+    eliminates the 429s (13/13 and 25/25-tail test batches both succeeded cleanly
+    in a single call).
+  - **Coverage gap directly confirmed solved, 2026-09-12**: with the poll loop
+    live, the very first real result was **N821CP/CAP1121, squawking 1200 (VFR, no
+    flight following)** — showing up immediately and correctly on the map. This is
+    exactly the traffic FDPS/STDDS structurally cannot see (no flight-plan/
+    beacon-code correlation), confirming raw ADS-B was the right category of fix.
+  - **Implementation**: `app/adsb/adsb_lol.py` (`AdsbLolProvider`, `name="adsb_lol"`),
+    `PositionSource.adsb_lol` added (hand-written migration, same Postgres-enum
+    pattern as `swim`). Runs as an **independent poll loop alongside FlightAware**
+    (`app/main.py`), gated by its own `ADSBLOL_POLLING_ENABLED` (default true —
+    unlike AeroAPI this has no per-call cost, so it doesn't share AeroAPI's
+    cost-pause) and `ADSBLOL_POLL_INTERVAL_SECONDS` (default 30) settings.
+    `app/ingestion/poller.run_poll_loop()` now takes an optional per-provider
+    interval instead of always reading the single global
+    `adsb_poll_interval_seconds`, so multiple providers can run on different
+    cadences concurrently.
+  - **Not yet done**: this has only been proven with one real aircraft over a short
+    window, not validated across a whole exercise day the way FlightAware was.
+    Worth watching for: coverage gaps in genuinely rural areas with no nearby
+    volunteer receiver (raw ADS-B's real weak point, vs. FAA's own radar/receiver
+    network), and whether adsb.lol's "dynamic" rate limit ever bites the bulk
+    single-call approach at a larger fleet size than tested here (25 tails).
+
 ### 3.6 Reliability / Data Management
 - Routine, automated database backups (flight data is the thing that must not be lost).
 

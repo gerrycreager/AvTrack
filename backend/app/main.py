@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.adsb.adsb_lol import AdsbLolProvider
 from app.adsb.flightaware import FlightAwareProvider
 from app.api import aircraft, airfields, airspace, events, gis, locate, swim, ws
 from app.config import settings
@@ -48,21 +49,34 @@ async def health():
 @app.on_event("startup")
 async def on_startup():
     await init_db()
+    logger = logging.getLogger(__name__)
+    app.state.poll_tasks = []
+
+    # Independent of each other -- adsb.lol has no per-call cost (unlike AeroAPI, see
+    # REQUIREMENTS.md 3.5's cost-pause history), so it defaults on regardless of
+    # whether FlightAware polling is enabled.
     if not settings.adsb_polling_enabled:
-        logging.getLogger(__name__).warning("ADSB_POLLING_ENABLED=false -- ADS-B polling paused.")
+        logger.warning("ADSB_POLLING_ENABLED=false -- FlightAware polling paused.")
     elif settings.flightaware_api_key:
         provider = FlightAwareProvider()
-        app.state.poll_task = asyncio.create_task(run_poll_loop(provider))
+        app.state.poll_tasks.append(asyncio.create_task(run_poll_loop(provider)))
     else:
-        logging.getLogger(__name__).warning(
-            "FLIGHTAWARE_API_KEY not set -- ADS-B polling disabled. Set it in .env to enable live tracking."
+        logger.warning(
+            "FLIGHTAWARE_API_KEY not set -- FlightAware polling disabled. Set it in .env to enable."
         )
+
+    if settings.adsblol_polling_enabled:
+        provider = AdsbLolProvider()
+        app.state.poll_tasks.append(
+            asyncio.create_task(run_poll_loop(provider, interval_seconds=settings.adsblol_poll_interval_seconds))
+        )
+    else:
+        logger.warning("ADSBLOL_POLLING_ENABLED=false -- adsb.lol polling paused.")
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    task = getattr(app.state, "poll_task", None)
-    if task:
+    for task in getattr(app.state, "poll_tasks", []):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
