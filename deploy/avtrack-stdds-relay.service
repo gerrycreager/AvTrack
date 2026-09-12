@@ -1,0 +1,26 @@
+# Companion to avtrack-stdds-consumer.service -- tails the consumer's log file,
+# looks for CAP-shaped <acid> callsigns, logs matches (does not forward to cosp1 yet
+# -- see stdds_relay.py FORWARD_ENABLED comment). Coverage-detection phase only.
+#
+# Install (one-time, on r815):
+#   sudo cp avtrack-stdds-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now avtrack-stdds-relay
+
+[Unit]
+Description=AvTrack SWIM/STDDS relay (tail local log -> detect CAP-relevant messages)
+After=avtrack-stdds-consumer.service
+Requires=avtrack-stdds-consumer.service
+
+[Service]
+Type=simple
+User=gerry
+WorkingDirectory=/home/gerry/CAP/AvTrack/jumpstart-stdds
+ExecStart=/usr/bin/python3 -u /home/gerry/CAP/AvTrack/jumpstart-stdds/stdds_relay.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

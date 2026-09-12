@@ -1,0 +1,41 @@
+# AvTrack SWIM/FDPS consumer -- runs on r815 (not cosp1) because SCDS access is
+# gated by IP allowlist and r815 has a fixed IP; cosp1's ISP-assigned address can
+# change. This service just runs the official FAA/L3Harris JumpStart client against
+# the FDPS queue, writing received messages to a local bounded rotating log
+# (./log/messages.log, 100MB x 10 files max = 1GB) -- it does NOT parse or forward
+# anything itself. A separate script (fdps_relay.py) tails that log, filters for
+# CAP-relevant messages, and forwards just those to cosp1's backend for real parsing.
+# See REQUIREMENTS.md 3.5.
+#
+# Install (one-time, on r815):
+#   sudo cp avtrack-fdps-consumer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now avtrack-fdps-consumer
+
+[Unit]
+Description=AvTrack SWIM/FDPS consumer (JumpStart client -> local log file)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gerry
+WorkingDirectory=/home/gerry/CAP/AvTrack/jumpstart
+EnvironmentFile=/home/gerry/CAP/AvTrack/jumpstart/fdps.env
+ExecStart=/usr/bin/java \
+  -DproviderUrl=tcps://ems1.swim.faa.gov:55443 \
+  -Dqueue=gcreager.capnhq.gov.FDPS.e0a558df-459a-4796-a74b-98efdd27131b.OUT \
+  -DconnectionFactory=gcreager.capnhq.gov.CF \
+  -Dusername=gcreager.capnhq.gov \
+  -Dpassword=${SWIM_PASSWORD} \
+  -Dvpn=FDPS \
+  -Doutput=com.harris.cinnato.outputs.FileOutput \
+  -Dmetrics=false \
+  -jar /home/gerry/CAP/AvTrack/jumpstart/lib/jumpstart-jar-with-dependencies.jar
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

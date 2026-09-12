@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+node_modules/
+dist/
+*.log
+.DS_Store
+pgdata/
+data/
+jumpstart-latest.tar.gz
+jumpstart/

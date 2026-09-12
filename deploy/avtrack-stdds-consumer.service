@@ -1,0 +1,44 @@
+# AvTrack SWIM/STDDS consumer -- runs on r815 alongside avtrack-fdps-consumer.service
+# for the same IP-allowlist reason (see that file). This is the same JumpStart client
+# pointed at the STDDS queue instead of FDPS, to test whether STDDS (terminal/local
+# surveillance data, not flight-plan-derived) can see CAP VFR traffic that FDPS
+# structurally cannot -- see REQUIREMENTS.md 3.5, "Coverage concern effectively
+# confirmed 2026-09-12/13".
+#
+# Uses a SEPARATE working directory (jumpstart-stdds/, sibling to jumpstart/) because
+# the JumpStart FileOutput writes to a hardcoded relative path (./log/messages.log,
+# baked into the jar's log4j2.properties) -- running two instances from the same
+# directory would have them clobber each other's log file.
+#
+# Install (one-time, on r815):
+#   sudo cp avtrack-stdds-consumer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now avtrack-stdds-consumer
+
+[Unit]
+Description=AvTrack SWIM/STDDS consumer (JumpStart client -> local log file)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gerry
+WorkingDirectory=/home/gerry/CAP/AvTrack/jumpstart-stdds
+EnvironmentFile=/home/gerry/CAP/AvTrack/jumpstart-stdds/stdds.env
+ExecStart=/usr/bin/java \
+  -DproviderUrl=tcps://ems1.swim.faa.gov:55443 \
+  -Dqueue=gcreager.capnhq.gov.STDDS.b85ac3e2-37b8-4f60-987b-9ff7d75cad16.OUT \
+  -DconnectionFactory=gcreager.capnhq.gov.CF \
+  -Dusername=gcreager.capnhq.gov \
+  -Dpassword=${SWIM_PASSWORD} \
+  -Dvpn=STDDS \
+  -Doutput=com.harris.cinnato.outputs.FileOutput \
+  -Dmetrics=false \
+  -jar /home/gerry/CAP/AvTrack/jumpstart/lib/jumpstart-jar-with-dependencies.jar
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

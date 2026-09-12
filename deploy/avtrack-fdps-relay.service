@@ -1,0 +1,25 @@
+# Companion to avtrack-fdps-consumer.service -- tails the consumer's log file,
+# filters for CAP-relevant messages, forwards them to cosp1. See fdps_relay.py.
+#
+# Install (one-time, on r815):
+#   sudo cp avtrack-fdps-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now avtrack-fdps-relay
+
+[Unit]
+Description=AvTrack SWIM/FDPS relay (tail local log -> forward CAP-relevant messages to cosp1)
+After=avtrack-fdps-consumer.service
+Requires=avtrack-fdps-consumer.service
+
+[Service]
+Type=simple
+User=gerry
+WorkingDirectory=/home/gerry/CAP/AvTrack/jumpstart
+ExecStart=/usr/bin/python3 -u /home/gerry/CAP/AvTrack/jumpstart/fdps_relay.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

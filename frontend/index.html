@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AvTrack</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    #panel {
+      /* Narrowed 2026-09-13: the row template only shows callsign + alt/speed now,
+         not the tail number, so less horizontal space is needed. */
+      position: absolute; top: 0; right: 0; width: 190px; height: 100%;
+      background: rgba(20, 24, 28, 0.92); color: #e8eaed; overflow-y: auto;
+      box-sizing: border-box; padding: 12px; z-index: 1;
+    }
+    #panel h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4ad; margin: 4px 0 8px; }
+    .aircraft-row { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; background: #262b31; font-size: 13px; }
+    .aircraft-row.unlisted { background: #4a2a1a; border: 1px solid #d98a3d; }
+    .aircraft-row .callsign { font-weight: 600; }
+    .aircraft-row .meta { color: #9aa4ad; font-size: 11px; }
+    #locate-bar { position: absolute; top: 10px; left: 10px; z-index: 1; display: flex; gap: 6px; }
+    #locate-bar input { padding: 6px 8px; border-radius: 4px; border: 1px solid #888; }
+    #locate-bar input#locate-input { width: 220px; }
+    #locate-bar input#locate-radius { width: 60px; }
+    #locate-bar button { padding: 6px 10px; border-radius: 4px; border: none; background: #2b6cb0; color: white; cursor: pointer; }
+
+    /* Aircraft marker + ATC-style datablock */
+    /* display: inline-block is load-bearing here -- found live 2026-09-13. Without
+       it, a plain block <div> with no explicit width stretches to fill all available
+       width (the whole map viewport) instead of shrink-wrapping to its actual content
+       (a 16x16 dot). MapLibre's marker centering then computes translate(-50%, -50%)
+       against that wrong (viewport-wide) size, shoving the visible dot hundreds of
+       pixels off to the side while the separately-positioned datablock still tracks
+       correctly -- which is exactly the "datablock with no aircraft icon" symptom
+       this was reported as. Confirmed via getBoundingClientRect, not just computed
+       style -- a computed-style-only check earlier had missed this entirely. */
+    .aircraft-marker { position: relative; cursor: pointer; display: inline-block; }
+    /* Directional aircraft glyph (fixed 2026-09-13): was a plain circle, which JS
+       already tried to rotate by heading -- a no-op, since a circle looks identical
+       at any rotation angle. This dart/kite shape actually shows the rotation.
+       Points "up" (north) at heading_deg=0, matching the map's fixed north-up
+       orientation (bearing is never changed) and CSS rotate()'s 0deg = unrotated
+       convention -- so main.js's existing `rotate(${heading_deg}deg)` now works
+       correctly without needing any JS change. */
+    .aircraft-dot {
+      width: 24px; height: 24px;
+      clip-path: polygon(50% 0%, 85% 100%, 50% 76%, 15% 100%);
+      filter: drop-shadow(0 0 1.5px white) drop-shadow(0 0 1.5px white);
+    }
+    .aircraft-datablock {
+      position: absolute; left: 15px; top: -8px; font-size: 12pt; line-height: 1.25;
+      color: #e8eaed; background: rgba(20, 24, 28, 0.78); padding: 2px 5px; border-radius: 3px;
+      white-space: nowrap; pointer-events: none; font-family: ui-monospace, monospace;
+    }
+    .aircraft-datablock .cs { font-weight: 600; }
+
+    /* Basemap switcher */
+    #basemap-switcher { position: absolute; top: 10px; right: 202px; z-index: 1; }
+    #basemap-switcher select { padding: 6px 8px; border-radius: 4px; border: 1px solid #888; }
+
+    /* Airspace (SUA) toggles + custom mission-layer upload -- REQUIREMENTS.md 3.2 */
+    #layers-panel {
+      position: absolute; top: 50px; left: 10px; z-index: 1; width: 210px;
+      background: rgba(20, 24, 28, 0.92); color: #e8eaed; border-radius: 6px;
+      padding: 10px 12px; box-sizing: border-box; font-size: 12px;
+    }
+    #layers-panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4ad; margin: 0 0 6px; }
+    #layers-panel .divider { border-top: 1px solid #3a4048; margin: 10px 0; }
+    #layers-panel label { display: block; margin-bottom: 4px; cursor: pointer; }
+    #layers-panel .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
+    #gis-upload-row { display: flex; gap: 4px; margin-bottom: 6px; }
+    #gis-upload-row input[type="file"] { flex: 1; min-width: 0; font-size: 11px; color: #e8eaed; }
+    #gis-upload-row button { padding: 4px 8px; border-radius: 4px; border: none; background: #2b6cb0; color: white; cursor: pointer; font-size: 11px; }
+    .gis-layer-row { display: flex; align-items: center; justify-content: space-between; padding: 3px 0; }
+    .gis-layer-row .gis-layer-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gis-layer-row button { background: none; border: none; color: #d9534f; cursor: pointer; font-size: 13px; padding: 0 4px; }
+
+    /* Sortie panel */
+    #sortie-panel {
+      position: absolute; bottom: 0; left: 0; width: 380px; max-height: 60%;
+      background: rgba(20, 24, 28, 0.95); color: #e8eaed; overflow-y: auto;
+      box-sizing: border-box; padding: 14px; z-index: 2; border-top-right-radius: 8px;
+      box-shadow: 0 0 12px rgba(0,0,0,0.5);
+    }
+    #sortie-panel[hidden] { display: none; }
+    #sortie-panel h2 { margin: 0 0 2px; font-size: 16px; }
+    #sortie-panel .sub { color: #9aa4ad; font-size: 12px; margin-bottom: 10px; }
+    #sortie-panel .close-btn {
+      position: absolute; top: 10px; right: 10px; background: none; border: none;
+      color: #9aa4ad; font-size: 16px; cursor: pointer;
+    }
+    #sortie-panel .log-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    #sortie-panel .log-buttons button {
+      padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid #2b6cb0;
+      background: transparent; color: #6fa8dc; cursor: pointer;
+    }
+    #sortie-panel .log-buttons button:hover { background: #2b6cb0; color: white; }
+    .event-row { background: #262b31; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; font-size: 12px; }
+    .event-row .event-type { font-weight: 600; text-transform: uppercase; font-size: 11px; }
+    .event-row .event-time { color: #cdd3d8; }
+    .event-row .edited-tag { color: #d98a3d; font-size: 10px; margin-left: 4px; }
+    .event-row .edit-controls { margin-top: 4px; display: flex; gap: 4px; }
+    .event-row .edit-controls input { flex: 1; font-size: 11px; padding: 2px 4px; }
+    .event-row .edit-controls button { font-size: 11px; padding: 2px 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="locate-bar">
+    <input id="locate-input" placeholder="ICAO id, lat,lon, or MGRS/USNG" />
+    <input id="locate-radius" type="number" min="0" step="1" value="10" title="Operations area radius" />
+    <span style="color:#ccc; align-self:center; font-size:12px;">nm</span>
+    <button id="locate-btn">Go</button>
+  </div>
+  <div id="basemap-switcher">
+    <select id="basemap-select">
+      <option value="topo" selected>Terrain (USGS Topo)</option>
+      <option value="streets">Streets</option>
+      <option value="imagery">Imagery</option>
+    </select>
+    <label style="color:#e8eaed; font-size:12px; background:rgba(20,24,28,0.85); padding:5px 8px; border-radius:4px; margin-left:6px;">
+      <input type="checkbox" id="labels-toggle" checked /> Airfield labels
+    </label>
+  </div>
+  <div id="layers-panel">
+    <h3>Airspace</h3>
+    <label><input type="checkbox" id="sua-prohib-toggle" /> <span class="swatch" style="background:#cc0000;"></span>Prohibited</label>
+    <label><input type="checkbox" id="sua-restrict-toggle" /> <span class="swatch" style="background:#dc6400;"></span>Restricted</label>
+    <label><input type="checkbox" id="sua-moa-toggle" /> <span class="swatch" style="background:#5000c8;"></span>MOA / Warning / Alert</label>
+    <div class="divider"></div>
+    <h3>Mission Layers</h3>
+    <div id="gis-upload-row">
+      <input type="file" id="gis-upload-input" accept=".zip,.kml,.kmz,.geojson,.json" />
+      <button id="gis-upload-btn">Add</button>
+    </div>
+    <div id="gis-layers-list"><em style="color:#9aa4ad;">None uploaded</em></div>
+  </div>
+  <div id="panel">
+    <h2>Aircraft Aloft</h2>
+    <div id="aircraft-list"><em>Connecting…</em></div>
+  </div>
+  <div id="sortie-panel" hidden>
+    <button class="close-btn" id="sortie-close">✕</button>
+    <h2 id="sortie-title">—</h2>
+    <div class="sub" id="sortie-subtitle"></div>
+    <div class="sub">
+      Display timezone:
+      <select id="tz-select">
+        <option value="UTC" selected>UTC</option>
+        <option value="America/New_York">Eastern</option>
+        <option value="America/Chicago">Central</option>
+        <option value="America/Denver">Mountain</option>
+        <option value="America/Phoenix">Arizona (no DST)</option>
+        <option value="America/Los_Angeles">Pacific</option>
+        <option value="America/Anchorage">Alaska</option>
+        <option value="Pacific/Honolulu">Hawaii</option>
+        <option value="America/Puerto_Rico">Puerto Rico</option>
+      </select>
+    </div>
+    <div class="log-buttons" id="sortie-log-buttons"></div>
+    <div id="sortie-events"><em>Loading…</em></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
