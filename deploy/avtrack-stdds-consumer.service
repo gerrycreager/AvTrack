@@ -14,6 +14,10 @@
 #   sudo cp avtrack-stdds-consumer.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now avtrack-stdds-consumer
+#
+# stdds.env (0600, not committed) must define SWIM_USERNAME, SWIM_CONNECTION_FACTORY,
+# SWIM_QUEUE, and SWIM_PASSWORD -- account-specific values are deliberately kept out
+# of this file (which IS committed, repo is public) rather than hardcoded here.
 
 [Unit]
 Description=AvTrack SWIM/STDDS consumer (JumpStart client -> local log file)
@@ -27,9 +31,9 @@ WorkingDirectory=/home/gerry/CAP/AvTrack/jumpstart-stdds
 EnvironmentFile=/home/gerry/CAP/AvTrack/jumpstart-stdds/stdds.env
 ExecStart=/usr/bin/java \
   -DproviderUrl=tcps://ems1.swim.faa.gov:55443 \
-  -Dqueue=gcreager.capnhq.gov.STDDS.b85ac3e2-37b8-4f60-987b-9ff7d75cad16.OUT \
-  -DconnectionFactory=gcreager.capnhq.gov.CF \
-  -Dusername=gcreager.capnhq.gov \
+  -Dqueue=${SWIM_QUEUE} \
+  -DconnectionFactory=${SWIM_CONNECTION_FACTORY} \
+  -Dusername=${SWIM_USERNAME} \
   -Dpassword=${SWIM_PASSWORD} \
   -Dvpn=STDDS \
   -Doutput=com.harris.cinnato.outputs.FileOutput \
