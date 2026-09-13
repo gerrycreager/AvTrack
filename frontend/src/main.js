@@ -101,6 +101,23 @@ const map = new maplibregl.Map({
 window.map = map; // exposed deliberately for console/devtools debugging
 window.openSortiePanel = openSortiePanel; // same -- lets devtools/tests open the panel for any tail directly
 
+// True once the map's initial style load has completed. Deliberately NOT
+// map.isStyleLoaded() -- found live 2026-09-13 (Gerry: "I looked and didn't see the
+// MGRS box either"): that method tracks whether all currently-visible *tiles* have
+// finished loading, not whether the style is ready to accept new sources/layers,
+// and it can sit at false for seconds at a time during normal use (e.g. right after
+// a pan/zoom). setOpsArea/setMgrsBox used to guard on it with
+// `if (!isStyleLoaded()) map.once("load", retry)` -- broken, since MapLibre's
+// "load" event fires exactly once at startup; if the guard is hit after that (the
+// common case, since it's easy for isStyleLoaded() to be false well into normal
+// use), the deferred retry registers for an event that will never fire again, and
+// the feature just silently never appears. This flag is set exactly once, by the
+// map's real "load" event, and never rechecked after that.
+let mapStyleReady = false;
+map.on("load", () => {
+  mapStyleReady = true;
+});
+
 document.getElementById("basemap-select").addEventListener("change", (e) => {
   const selected = e.target.value;
   for (const key of Object.keys(BASEMAPS)) {
@@ -247,7 +264,7 @@ function circleGeoJSON([lon, lat], radiusNm, points = 64) {
 }
 
 function setOpsArea(center, radiusNm) {
-  if (!map.isStyleLoaded()) {
+  if (!mapStyleReady) {
     map.once("load", () => setOpsArea(center, radiusNm));
     return;
   }
@@ -805,6 +822,47 @@ document.getElementById("sortie-close").addEventListener("click", () => {
   currentSortieTail = null;
 });
 
+// MGRS precision-box outline (REQUIREMENTS.md 3.2, added 2026-09-13) -- when a
+// locate query resolves to a box (truncated-precision MGRS, coarser than ~1m --
+// see app/api/locate.py's _precision_box docstring for why a bare grid square
+// isn't really "a point"), draw the actual box instead of silently centering on
+// one arbitrary corner. bounds is [[lat,lon], SW, SE, NE, NW] as returned by the
+// backend -- each corner already independently converted, not a naive rectangle.
+function setMgrsBox(bounds) {
+  if (!mapStyleReady) {
+    map.once("load", () => setMgrsBox(bounds));
+    return;
+  }
+  const feature = {
+    type: "Feature",
+    geometry: { type: "Polygon", coordinates: [[...bounds, bounds[0]].map(([lat, lon]) => [lon, lat])] },
+  };
+  const source = map.getSource("mgrs-box");
+  if (source) {
+    source.setData(feature);
+  } else {
+    map.addSource("mgrs-box", { type: "geojson", data: feature });
+    map.addLayer({
+      id: "mgrs-box-fill",
+      type: "fill",
+      source: "mgrs-box",
+      paint: { "fill-color": "#d9534f", "fill-opacity": 0.08 },
+    });
+    map.addLayer({
+      id: "mgrs-box-line",
+      type: "line",
+      source: "mgrs-box",
+      paint: { "line-color": "#d9534f", "line-width": 2, "line-dasharray": [2, 1] },
+    });
+  }
+}
+
+function clearMgrsBox() {
+  if (map.getSource("mgrs-box")) {
+    map.getSource("mgrs-box").setData({ type: "FeatureCollection", features: [] });
+  }
+}
+
 async function locate(query) {
   query = query.trim();
   let url;
@@ -821,11 +879,25 @@ async function locate(query) {
     alert(`Could not locate "${query}"`);
     return;
   }
-  const { latitude, longitude } = await res.json();
+  const { latitude, longitude, bounds } = await res.json();
   const radiusNm = parseFloat(document.getElementById("locate-radius").value) || 0;
   if (radiusNm > 0) {
     setOpsArea([longitude, latitude], radiusNm);
   }
+  if (bounds) {
+    setMgrsBox(bounds);
+    const lons = bounds.map((c) => c[1]);
+    const lats = bounds.map((c) => c[0]);
+    map.fitBounds(
+      [
+        [Math.min(...lons), Math.min(...lats)],
+        [Math.max(...lons), Math.max(...lats)],
+      ],
+      { padding: 60 }
+    );
+    return;
+  }
+  clearMgrsBox();
   // Zoom out enough to see the whole radius circle rather than a fixed zoom level.
   const zoom = radiusNm > 0 ? Math.max(4, 11 - Math.log2(Math.max(radiusNm, 1) / 10)) : 11;
   map.flyTo({ center: [longitude, latitude], zoom });
