@@ -10,3 +10,4 @@ httpx==0.28.1
 shapely==2.0.6
 python-multipart==0.0.19
 mgrs==1.4.6
+reportlab==5.0.1

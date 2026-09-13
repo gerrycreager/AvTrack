@@ -184,6 +184,19 @@
       <button id="gis-upload-btn">Add</button>
     </div>
     <div id="gis-layers-list"><em style="color:#9aa4ad;">None uploaded</em></div>
+    <div class="divider"></div>
+    <h3>Comms Log Report</h3>
+    <div id="report-fields">
+      <label style="display:block; margin-bottom:4px;">Start<br/>
+        <input type="datetime-local" step="60" id="report-start" style="width:100%;" />
+      </label>
+      <label style="display:block; margin-bottom:4px;">End<br/>
+        <input type="datetime-local" step="60" id="report-end" style="width:100%;" />
+      </label>
+    </div>
+    <button id="generate-report-btn" style="width:100%; padding:5px; border-radius:4px; border:none; background:#2b6cb0; color:white; cursor:pointer; font-size:11px;">
+      Generate PDF
+    </button>
   </div>
   <div id="panel">
     <h2>Aircraft Aloft</h2>

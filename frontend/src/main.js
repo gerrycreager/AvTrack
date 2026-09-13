@@ -1057,6 +1057,30 @@ document.getElementById("roster-upload-btn").addEventListener("click", async () 
   await loadKnownAircraft(); // additive -- newly-uploaded tails stop showing as "unlisted"
 });
 
+// ── Comms log PDF report (REQUIREMENTS.md 3.3/3.6, added 2026-09-13) ────────
+// Per Gerry: end-of-operating-period PDF of every logged entry, showing when it
+// was actually *received* (not the reported/backdated event time), with several
+// entries received together grouped under one timestamp, and any comments.
+// datetime-local (not the rapid HHMM fields used elsewhere) since a period can
+// span multiple days -- this is a deliberate occasional action, not rapid-fire
+// radio logging, so a native date+time picker is the right tool here.
+function defaultReportEndValue() {
+  return utcToZonedInputValue(new Date(), displayTimezone).slice(0, 16); // datetime-local wants no seconds
+}
+document.getElementById("report-end").value = defaultReportEndValue();
+
+document.getElementById("generate-report-btn").addEventListener("click", () => {
+  const startVal = document.getElementById("report-start").value;
+  const endVal = document.getElementById("report-end").value || defaultReportEndValue();
+  if (!startVal) {
+    alert("Start time is required.");
+    return;
+  }
+  const startUtc = zonedInputValueToUtc(`${startVal}:00`, displayTimezone).toISOString();
+  const endUtc = zonedInputValueToUtc(`${endVal}:00`, displayTimezone).toISOString();
+  window.open(`/api/reports/comms-log?start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`, "_blank");
+});
+
 map.on("load", refreshAirfields);
 map.on("moveend", scheduleAirfieldsRefresh); // covers both pan and zoom (zoom-only still fires moveend)
 map.on("zoom", updateLabelFilter); // instant label-tier feedback, ahead of the debounced bbox refetch
