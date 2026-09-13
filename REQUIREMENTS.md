@@ -288,6 +288,32 @@ is reusable as the Phase 2 server's schema — not thrown away.
       timezone) for the cases where it genuinely is "right now." Left blank,
       it still means "use server-now," preserving the original quick-log
       behavior for when that's actually correct.
+  - **End-of-operating-period comms log PDF — shipped 2026-09-13**: per Gerry,
+    "missions can span days and there can be several operating periods per
+    day" — at the end of one, a PDF of "the effective communications logs with
+    the time when every entry was received, allowing several entered at once
+    to be noted within the same timestamp, and including any comments."
+    `GET /api/reports/comms-log?start=...&end=...` (reportlab, pure-Python, no
+    system deps) — every `TrackingEvent` across all aircraft **received**
+    (`created_at` — when the row was actually written, which the append-only
+    schema already tracked separately from the reported/backdated
+    `event_time_utc`) within the range, grouped under one timestamp when
+    several land in the same minute (matching real paper comms-log
+    convention — the report doesn't repeat the time on every line), each row
+    showing aircraft, entry type, effective (reported) time, and any waypoint
+    comments. "Operating period" is **not** a stored/named concept — the
+    range is picked at generation time, matching how an Incident Commander
+    actually declares period boundaries operationally (a live decision), not
+    something software should presume to know in advance. Trigger UI: a
+    "Comms Log Report" section in the layers panel, `datetime-local`
+    start/end pickers (not the rapid HHMM fields used elsewhere — this is a
+    deliberate occasional action, not rapid-fire radio logging, and a period
+    can span multiple days). **Gotcha found live**: a naive (no timezone
+    suffix) start/end input silently produced an empty report instead of an
+    error — dangerous for an accountability document, since it reads as
+    "nothing happened this period" rather than "your input was ambiguous."
+    Fixed by explicitly treating naive input as UTC rather than leaving it to
+    whatever the database driver does by default.
   - **Mission-specific roster upload — shipped 2026-09-13**: `POST
     /api/aircraft/roster` (small upload widget in the Aircraft Aloft panel) —
     same CSV shape/upsert logic as `scripts/import_callsign_tails.py`
