@@ -722,6 +722,29 @@ is reusable as the Phase 2 server's schema — not thrown away.
   but keep this document current in real time so a clean rebuild is *cheap and
   low-risk* once the requirement set settles after the exercise, rather than treating
   the current codebase as precious.
+- **Real outage, 2026-09-13**: the cosp1 backend had only ever been started manually
+  (`nohup uvicorn ... &`), which doesn't survive a reboot. Gerry rebooted cosp1 for a
+  software update; the backend never came back; r815's Apache reverse proxy
+  (`deploy/r815-avtrack.conf`) started returning 503 Service Unavailable to the
+  public URL — a real user-facing outage, purely from not having this as a real
+  service. Fixed with `deploy/avtrack-backend.service` (systemd, enabled +
+  `Restart=always`, `Requires=postgresql.service`) — survives both reboots and
+  crashes now. Lesson: **any process this project depends on staying up needs a
+  real systemd unit from the start**, not a manually-started background process,
+  even during active/iterative development — this is the second time in the
+  session a manually-run process turned out to matter more than expected (the
+  first being the SWIM/FDPS relay, which got a systemd unit from the start;
+  the backend itself didn't, until this outage).
+- **Also observed same day, unrelated to AvTrack**: r815 load average briefly hit
+  ~12-20 (uptime showed a 15-min average around 15) due to WxCOP's own scheduled
+  jobs (`satellite_cache_updater.py`, `mrms_cache_updater.py`,
+  `ingest_model_site_wx.py --conus-only`) overlapping — the two cache-updater
+  scripts showed multiple concurrent instances running at once (started minutes
+  apart, earlier ones still alive), consistent with a cron interval shorter than
+  the job's actual runtime causing pile-up. AvTrack's own r815 footprint
+  (FDPS/STDDS consumers + relays) remained negligible throughout (low single-digit
+  % CPU each) — confirmed via `ps aux --sort=-%cpu` at the time. Not an AvTrack
+  fix — flagged for whoever maintains WxCOP's cron scheduling, not acted on here.
 - **r815 disk space, checked 2026-09-13**: root filesystem (`/dev/sda3`, 938GB) is at
   97% (29GB free) — tight enough to be worth watching now that a persistent
   always-on service (the FDPS consumer, below) runs there. Found 5 additional
