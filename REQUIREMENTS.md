@@ -262,6 +262,32 @@ is reusable as the Phase 2 server's schema — not thrown away.
     matching the existing `window.map` debug-hook pattern. Verified end-to-end via
     Playwright: start → add an in-grid (lat/lon) and an ops-check (MGRS +
     altitude/fuel/comments) waypoint → stop → panel correctly reverts.
+  - **Rapid callsign/tail lookup + manual 24hr-clock time entry — shipped
+    2026-09-13**, per Gerry's real comms workflow: a radio call gives callsign
+    first, in this order (Callsign, Instructor, Sortie #, Destination, Engine
+    Start time — the RPP column order again), and the aircraft frequently has
+    **no live position yet** when that call comes in — "pilots will often have
+    spent some minutes doing initial checks immediately after engine start, and
+    in some cases will not call 'til they're airborne and leaving the area."
+    Two real gaps this exposed, both fixed:
+    - **No way to open an aircraft's panel without clicking a map icon or
+      sidebar row** (both require a live position to already exist). New
+      `#jump-input` (top-left toolbar, next to the existing locate bar) resolves
+      a typed callsign/tail via the existing `/api/aircraft/resolve` endpoint and
+      opens the sortie panel directly — `openSortiePanel()` already tolerated no
+      live position (falls back to displaying the tail number), so this was
+      purely a lookup-and-open gap, not a panel-logic one.
+    - **Every timestamp only ever defaulted to "server now"** — no way to log
+      the *actual* reported time when it wasn't the literal current moment.
+      Added a reusable time-entry field to engine start, engine stop, and every
+      waypoint: a free-typed `HHMM` (24hr clock) text field, deliberately **not**
+      a native `<input type="time">` (locale-dependent AM/PM rendering can't
+      guarantee 24hr display across browsers, and typing into a spinner widget
+      is slower than 4 keystrokes during a live radio call) + a "Now" button
+      that fills it with the current time (in the panel's selected display
+      timezone) for the cases where it genuinely is "right now." Left blank,
+      it still means "use server-now," preserving the original quick-log
+      behavior for when that's actually correct.
   - **Mission-specific roster upload — shipped 2026-09-13**: `POST
     /api/aircraft/roster` (small upload widget in the Aircraft Aloft panel) —
     same CSV shape/upsert logic as `scripts/import_callsign_tails.py`
