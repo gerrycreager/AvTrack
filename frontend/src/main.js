@@ -99,6 +99,7 @@ const map = new maplibregl.Map({
   zoom: 3.2,
 });
 window.map = map; // exposed deliberately for console/devtools debugging
+window.openSortiePanel = openSortiePanel; // same -- lets devtools/tests open the panel for any tail directly
 
 document.getElementById("basemap-select").addEventListener("change", (e) => {
   const selected = e.target.value;
@@ -490,6 +491,203 @@ async function openSortiePanel(tailNumber) {
   }
 
   await refreshSortieEvents(tailNumber);
+  await refreshSortieInfo(tailNumber);
+}
+
+// ── Sortie tracking (REQUIREMENTS.md 3.3, added 2026-09-13) ─────────────────
+// "Mission # ... can be a global variable for a given session" (Gerry) -- a
+// frontend-only convenience default that pre-fills new-sortie forms, carried
+// across aircraft within the same browser session. Each sortie still stores its
+// own mission_number server-side, so this is just a typing shortcut, not the
+// record of truth.
+const MISSION_NUMBER_KEY = "avtrack_session_mission_number";
+const WAYPOINT_TYPE_LABELS = { in_grid: "In-Grid", out_grid: "Out-Grid", ops_check: "Ops Check" };
+
+async function refreshSortieInfo(tailNumber) {
+  const container = document.getElementById("sortie-info");
+  container.innerHTML = "<em>Loading…</em>";
+  try {
+    const res = await fetch(`/api/aircraft/${tailNumber}/sorties/current`);
+    const sortie = await res.json(); // null if no sortie in progress
+    if (sortie) {
+      renderInProgressSortie(tailNumber, sortie);
+    } else {
+      renderStartSortieForm(tailNumber);
+    }
+  } catch (err) {
+    container.innerHTML = "<em>Failed to load sortie info.</em>";
+    console.error(err);
+  }
+}
+
+function renderStartSortieForm(tailNumber) {
+  const container = document.getElementById("sortie-info");
+  const savedMissionNumber = localStorage.getItem(MISSION_NUMBER_KEY) ?? "";
+  container.innerHTML = `
+    <h3>Start Sortie</h3>
+    <div class="sortie-field"><label>Sortie #</label><input type="number" id="new-sortie-number" /></div>
+    <div class="sortie-field"><label>Mission #</label><input type="text" id="new-mission-number" placeholder="YY-X-NNNN" value="${savedMissionNumber}" /></div>
+    <div class="sortie-field"><label>PIC</label><input type="text" id="new-pic-name" /></div>
+    <button class="sortie-action-btn" id="start-sortie-btn">Start Sortie — Engine Start NOW</button>
+  `;
+  document.getElementById("start-sortie-btn").addEventListener("click", async () => {
+    const sortieNumber = document.getElementById("new-sortie-number").value;
+    const missionNumber = document.getElementById("new-mission-number").value.trim();
+    const picName = document.getElementById("new-pic-name").value.trim();
+    if (missionNumber) localStorage.setItem(MISSION_NUMBER_KEY, missionNumber);
+    await fetch(`/api/aircraft/${tailNumber}/sorties`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sortie_number: sortieNumber ? parseInt(sortieNumber, 10) : null,
+        mission_number: missionNumber || null,
+        pic_name: picName || null,
+        logged_by: "gerry",
+      }),
+    });
+    await refreshSortieInfo(tailNumber);
+    await refreshSortieEvents(tailNumber);
+  });
+}
+
+function renderInProgressSortie(tailNumber, sortie) {
+  const container = document.getElementById("sortie-info");
+  const waypointRows = sortie.waypoints
+    .map((wp) => {
+      const extra =
+        wp.waypoint_type === "ops_check"
+          ? ` · ${wp.altitude_ft ?? "—"}ft · fuel ${wp.fuel_remaining_hours ?? 0}h${wp.fuel_remaining_minutes ?? 0}m${wp.comments ? ` · ${wp.comments}` : ""}`
+          : "";
+      return `
+        <div class="waypoint-row">
+          <span class="wp-type">${WAYPOINT_TYPE_LABELS[wp.waypoint_type] ?? wp.waypoint_type}</span>
+          <span class="wp-meta">${fmtInTz(wp.time_utc)} · ${wp.raw_input}${extra}</span>
+        </div>`;
+    })
+    .join("");
+
+  container.innerHTML = `
+    <h3>Sortie In Progress</h3>
+    <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>${fmtInTz(sortie.engine_start_utc)}</span></div>
+    <div class="sortie-summary-row"><span>PIC: ${sortie.pic_name ?? "—"}</span><span>Mission: ${sortie.mission_number ?? "—"}</span></div>
+    <button class="sortie-action-btn stop" id="stop-sortie-btn">Stop Sortie — Engine Stop NOW</button>
+
+    <div class="sortie-divider"></div>
+    <h3>Add Waypoint</h3>
+    <div class="sortie-field"><label>Type</label>
+      <select id="wp-type">
+        <option value="in_grid">In-Grid</option>
+        <option value="out_grid">Out-Grid</option>
+        <option value="ops_check">Ops Check</option>
+      </select>
+    </div>
+    <div class="sortie-field"><label>Location</label>
+      <select id="wp-method">
+        <option value="latlon">Lat/Lon</option>
+        <option value="mgrs">MGRS</option>
+        <option value="named_point">Named point</option>
+      </select>
+    </div>
+    <div id="wp-location-inputs"></div>
+    <div id="wp-ops-check-fields" hidden>
+      <div class="sortie-field"><label>Altitude</label><input type="number" id="wp-altitude" /></div>
+      <div class="sortie-field"><label>Fuel rem.</label>
+        <input type="number" id="wp-fuel-h" min="0" placeholder="hh" style="flex: 0 0 55px;" /> :
+        <input type="number" id="wp-fuel-m" min="0" max="59" placeholder="mm" style="flex: 0 0 55px;" />
+      </div>
+      <textarea id="wp-comments" rows="2" placeholder="Comments"></textarea>
+    </div>
+    <button class="sortie-action-btn" id="add-waypoint-btn">Add Waypoint</button>
+
+    <div class="sortie-divider"></div>
+    <div id="waypoint-list">${waypointRows || '<em style="color:#9aa4ad; font-size:11px;">No waypoints logged yet.</em>'}</div>
+  `;
+
+  document.getElementById("stop-sortie-btn").addEventListener("click", async () => {
+    await fetch(`/api/sorties/${sortie.id}/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logged_by: "gerry" }),
+    });
+    await refreshSortieInfo(tailNumber);
+    await refreshSortieEvents(tailNumber);
+  });
+
+  const methodSelect = document.getElementById("wp-method");
+  const typeSelect = document.getElementById("wp-type");
+  methodSelect.addEventListener("change", () => updateWaypointLocationInputs(methodSelect.value));
+  typeSelect.addEventListener("change", () => {
+    document.getElementById("wp-ops-check-fields").hidden = typeSelect.value !== "ops_check";
+  });
+  updateWaypointLocationInputs(methodSelect.value);
+
+  document.getElementById("add-waypoint-btn").addEventListener("click", () => addWaypoint(tailNumber, sortie.id));
+}
+
+function updateWaypointLocationInputs(method) {
+  const container = document.getElementById("wp-location-inputs");
+  if (method === "mgrs") {
+    container.innerHTML = `<div class="sortie-field"><label>MGRS</label><input type="text" id="wp-raw-input" placeholder="16SFJ8362771646" /></div>`;
+  } else if (method === "named_point") {
+    container.innerHTML = `
+      <div class="sortie-field"><label>Place name</label><input type="text" id="wp-raw-input" placeholder="over Smithville" /></div>
+      <div class="sortie-field"><label>Lat, Lon</label>
+        <input type="number" step="any" id="wp-lat" placeholder="lat" style="flex: 1;" />
+        <input type="number" step="any" id="wp-lon" placeholder="lon" style="flex: 1;" />
+      </div>`;
+  } else {
+    container.innerHTML = `
+      <div class="sortie-field"><label>Lat, Lon</label>
+        <input type="number" step="any" id="wp-lat" placeholder="lat" style="flex: 1;" />
+        <input type="number" step="any" id="wp-lon" placeholder="lon" style="flex: 1;" />
+      </div>`;
+  }
+}
+
+async function addWaypoint(tailNumber, sortieId) {
+  const waypointType = document.getElementById("wp-type").value;
+  const locationMethod = document.getElementById("wp-method").value;
+  const lat = document.getElementById("wp-lat")?.value;
+  const lon = document.getElementById("wp-lon")?.value;
+  // MGRS's own text field IS the raw_input; lat/lon methods use the coordinates
+  // themselves as raw_input (accountability -- preserves exactly what was entered).
+  const rawInputField = document.getElementById("wp-raw-input");
+  const rawInput = rawInputField ? rawInputField.value.trim() : `${lat},${lon}`;
+  if (!rawInput || (locationMethod !== "mgrs" && (!lat || !lon))) {
+    alert("Location is required.");
+    return;
+  }
+
+  const body = {
+    waypoint_type: waypointType,
+    location_method: locationMethod,
+    raw_input: rawInput,
+    latitude: lat ? parseFloat(lat) : null,
+    longitude: lon ? parseFloat(lon) : null,
+    logged_by: "gerry",
+  };
+  if (waypointType === "ops_check") {
+    const altitude = document.getElementById("wp-altitude").value;
+    const fuelH = document.getElementById("wp-fuel-h").value;
+    const fuelM = document.getElementById("wp-fuel-m").value;
+    const comments = document.getElementById("wp-comments").value.trim();
+    body.altitude_ft = altitude ? parseFloat(altitude) : null;
+    body.fuel_remaining_hours = fuelH ? parseInt(fuelH, 10) : null;
+    body.fuel_remaining_minutes = fuelM ? parseInt(fuelM, 10) : null;
+    body.comments = comments || null;
+  }
+
+  const res = await fetch(`/api/sorties/${sortieId}/waypoints`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(`Could not add waypoint: ${err.detail ?? res.statusText}`);
+    return;
+  }
+  await refreshSortieInfo(tailNumber);
 }
 
 async function refreshSortieEvents(tailNumber) {

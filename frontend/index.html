@@ -111,6 +111,31 @@
     .event-row .edit-controls { margin-top: 4px; display: flex; gap: 4px; }
     .event-row .edit-controls input { flex: 1; font-size: 11px; padding: 2px 4px; }
     .event-row .edit-controls button { font-size: 11px; padding: 2px 6px; cursor: pointer; }
+
+    /* Sortie tracking (REQUIREMENTS.md 3.3, added 2026-09-13) */
+    #sortie-panel .sortie-info { background: #1c2126; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+    #sortie-panel .sortie-info h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #9aa4ad; }
+    #sortie-panel .sortie-field { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; }
+    #sortie-panel .sortie-field label { width: 78px; color: #9aa4ad; flex-shrink: 0; }
+    #sortie-panel .sortie-field input, #sortie-panel .sortie-field select {
+      flex: 1; min-width: 0; font-size: 12px; padding: 3px 5px; border-radius: 3px;
+      border: 1px solid #444; background: #14181c; color: #e8eaed;
+    }
+    #sortie-panel .sortie-action-btn {
+      width: 100%; padding: 7px; margin-top: 4px; border-radius: 4px; border: none;
+      background: #2b6cb0; color: white; cursor: pointer; font-size: 12px;
+    }
+    #sortie-panel .sortie-action-btn.stop { background: #a8460a; }
+    #sortie-panel .sortie-summary-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: #cdd3d8; }
+    #sortie-panel .sortie-divider { border-top: 1px solid #3a4048; margin: 10px 0; }
+    #sortie-panel .waypoint-row { background: #262b31; border-radius: 4px; padding: 5px 8px; margin-bottom: 5px; font-size: 11px; }
+    #sortie-panel .waypoint-row .wp-type { font-weight: 600; text-transform: uppercase; margin-right: 6px; }
+    #sortie-panel .waypoint-row .wp-meta { color: #9aa4ad; }
+    #sortie-panel textarea {
+      width: 100%; box-sizing: border-box; font-size: 12px; padding: 4px; border-radius: 3px;
+      border: 1px solid #444; background: #14181c; color: #e8eaed; resize: vertical; margin-bottom: 6px;
+    }
+    #sortie-panel summary { cursor: pointer; color: #9aa4ad; font-size: 11px; margin: 8px 0; }
   </style>
 </head>
 <body>
@@ -166,8 +191,14 @@
         <option value="America/Puerto_Rico">Puerto Rico</option>
       </select>
     </div>
-    <div class="log-buttons" id="sortie-log-buttons"></div>
-    <div id="sortie-events"><em>Loading…</em></div>
+
+    <div class="sortie-info" id="sortie-info"><em>Loading…</em></div>
+
+    <details>
+      <summary>Raw event log (manual NOW-button logging)</summary>
+      <div class="log-buttons" id="sortie-log-buttons"></div>
+      <div id="sortie-events"><em>Loading…</em></div>
+    </details>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
