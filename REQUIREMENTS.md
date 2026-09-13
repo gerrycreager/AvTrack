@@ -250,14 +250,23 @@ is reusable as the Phase 2 server's schema — not thrown away.
     `GET .../sorties/current` (most recent sortie if still in progress, else
     `null`), `POST /api/sorties/{id}/stop`, `PATCH /api/sorties/{id}` (metadata
     only), `POST /api/sorties/{id}/waypoints`.
-  - **Not yet built**: any frontend UI at all (the plan is to open this from
-    clicking an aircraft icon or its sidebar datablock row — both already route to
-    `openSortiePanel()`, so no new click-handling needed, just new panel content);
-    a mission-specific callsign/tail roster upload (Gerry, 2026-09-13: "now that we
-    can see almost any CAP aircraft [via adsb.lol], we need to have a way to upload
-    callsigns for a specific mission" — distinct from the existing monthly
-    wing-wide `scripts/import_callsign_tails.py` CSV, scoped to one mission/
-    exercise instead; Gerry to provide a real CSV).
+  - **Frontend UI — shipped 2026-09-13**: opens via the existing
+    `openSortiePanel()` click handler (aircraft icon or sidebar row, no new
+    click-wiring needed). Start-sortie form (Sortie #/Mission #/PIC, Mission #
+    pre-filled from the `localStorage` session default) when no sortie is in
+    progress; in-progress view (summary + Stop button + add-waypoint form with a
+    location-method selector and conditional ops-check fields + waypoint list)
+    once one is. The pre-existing raw NOW-button event log is kept, now tucked
+    under a collapsed `<details>` so it doesn't compete with the new primary
+    workflow. `window.openSortiePanel` also exposed for devtools/test access,
+    matching the existing `window.map` debug-hook pattern. Verified end-to-end via
+    Playwright: start → add an in-grid (lat/lon) and an ops-check (MGRS +
+    altitude/fuel/comments) waypoint → stop → panel correctly reverts.
+  - **Not yet built**: a mission-specific callsign/tail roster upload (Gerry,
+    2026-09-13: "now that we can see almost any CAP aircraft [via adsb.lol], we
+    need to have a way to upload callsigns for a specific mission" — distinct from
+    the existing monthly wing-wide `scripts/import_callsign_tails.py` CSV, scoped
+    to one mission/exercise instead; Gerry to provide a real CSV).
 
 ### 3.4 Weather
 - MRMS composite reflectivity and velocity overlay.
