@@ -473,6 +473,58 @@ function zonedInputValueToUtc(wallClockStr, tz) {
   return new Date(asIfUtc.getTime() + offsetMs);
 }
 
+// ── Manual 24hr-clock time entry, with a "Now" fill button (REQUIREMENTS.md 3.3,
+// added 2026-09-13) ── Per Gerry: a plain "NOW" button alone isn't enough for
+// engine start/stop -- pilots often don't call it in until several minutes
+// afterward (sometimes not until airborne, clear of the field), so the *actual*
+// reported time has to be enterable directly, in 24hr clock, not just "whatever
+// time it is when comms gets around to logging it." Kept as a free-typed HHMM
+// text field rather than a native <input type="time"> -- a native time picker's
+// spinner/AM-PM rendering is locale-dependent (can't guarantee 24hr display
+// across browsers) and slower to type into quickly during a live radio call than
+// just typing 4 digits. Today's date (in the selected display timezone) is
+// assumed -- logging a time from a prior day isn't supported yet.
+function currentHHMM(tz) {
+  const s = utcToZonedInputValue(new Date(), tz); // "YYYY-MM-DDTHH:MM:SS"
+  return s.slice(11, 13) + s.slice(14, 16);
+}
+
+// Returns a UTC Date, or null if the field is empty/unparseable (caller should
+// treat null as "use server-now", matching every event-creation endpoint's
+// default when a time is omitted).
+function hhmmInputToUtc(hhmmText, tz) {
+  const digits = (hhmmText || "").replace(/[^0-9]/g, "");
+  if (digits.length !== 4) return null;
+  const hh = digits.slice(0, 2);
+  const mm = digits.slice(2, 4);
+  const todayLocalDate = utcToZonedInputValue(new Date(), tz).slice(0, 10);
+  return zonedInputValueToUtc(`${todayLocalDate}T${hh}:${mm}:00`, tz);
+}
+
+// A time-entry field + "Now" button, as an HTML fragment -- used identically for
+// engine start, engine stop, and every waypoint type. `idPrefix` keeps element
+// ids unique when more than one appears in the panel at once.
+function timeEntryFieldHtml(idPrefix, label) {
+  return `
+    <div class="sortie-field"><label>${label}</label>
+      <input type="text" id="${idPrefix}-time" placeholder="HHMM (24hr)" style="flex: 1;" />
+      <button type="button" class="now-btn" id="${idPrefix}-now-btn" style="flex: 0 0 44px;">Now</button>
+    </div>`;
+}
+
+function wireTimeEntryField(idPrefix) {
+  document.getElementById(`${idPrefix}-now-btn`).addEventListener("click", () => {
+    document.getElementById(`${idPrefix}-time`).value = currentHHMM(displayTimezone);
+  });
+}
+
+// null (field left blank -- becomes "use server-now") or an ISO UTC string ready
+// to send as e.g. engine_start_utc/time_utc.
+function readTimeEntryField(idPrefix) {
+  const utcDate = hhmmInputToUtc(document.getElementById(`${idPrefix}-time`).value, displayTimezone);
+  return utcDate ? utcDate.toISOString() : null;
+}
+
 async function openSortiePanel(tailNumber) {
   currentSortieTail = tailNumber;
   const panel = document.getElementById("sortie-panel");
@@ -528,8 +580,10 @@ function renderStartSortieForm(tailNumber) {
     <div class="sortie-field"><label>Sortie #</label><input type="number" id="new-sortie-number" /></div>
     <div class="sortie-field"><label>Mission #</label><input type="text" id="new-mission-number" placeholder="YY-X-NNNN" value="${savedMissionNumber}" /></div>
     <div class="sortie-field"><label>PIC</label><input type="text" id="new-pic-name" /></div>
-    <button class="sortie-action-btn" id="start-sortie-btn">Start Sortie — Engine Start NOW</button>
+    ${timeEntryFieldHtml("new-engine-start", "Eng Start")}
+    <button class="sortie-action-btn" id="start-sortie-btn">Start Sortie</button>
   `;
+  wireTimeEntryField("new-engine-start");
   document.getElementById("start-sortie-btn").addEventListener("click", async () => {
     const sortieNumber = document.getElementById("new-sortie-number").value;
     const missionNumber = document.getElementById("new-mission-number").value.trim();
@@ -542,6 +596,7 @@ function renderStartSortieForm(tailNumber) {
         sortie_number: sortieNumber ? parseInt(sortieNumber, 10) : null,
         mission_number: missionNumber || null,
         pic_name: picName || null,
+        engine_start_utc: readTimeEntryField("new-engine-start"),
         logged_by: "gerry",
       }),
     });
@@ -570,7 +625,8 @@ function renderInProgressSortie(tailNumber, sortie) {
     <h3>Sortie In Progress</h3>
     <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>${fmtInTz(sortie.engine_start_utc)}</span></div>
     <div class="sortie-summary-row"><span>PIC: ${sortie.pic_name ?? "—"}</span><span>Mission: ${sortie.mission_number ?? "—"}</span></div>
-    <button class="sortie-action-btn stop" id="stop-sortie-btn">Stop Sortie — Engine Stop NOW</button>
+    ${timeEntryFieldHtml("stop-engine", "Eng Stop")}
+    <button class="sortie-action-btn stop" id="stop-sortie-btn">Stop Sortie</button>
 
     <div class="sortie-divider"></div>
     <h3>Add Waypoint</h3>
@@ -589,6 +645,7 @@ function renderInProgressSortie(tailNumber, sortie) {
       </select>
     </div>
     <div id="wp-location-inputs"></div>
+    ${timeEntryFieldHtml("wp", "Time")}
     <div id="wp-ops-check-fields" hidden>
       <div class="sortie-field"><label>Altitude</label><input type="number" id="wp-altitude" /></div>
       <div class="sortie-field"><label>Fuel rem.</label>
@@ -602,12 +659,14 @@ function renderInProgressSortie(tailNumber, sortie) {
     <div class="sortie-divider"></div>
     <div id="waypoint-list">${waypointRows || '<em style="color:#9aa4ad; font-size:11px;">No waypoints logged yet.</em>'}</div>
   `;
+  wireTimeEntryField("stop-engine");
+  wireTimeEntryField("wp");
 
   document.getElementById("stop-sortie-btn").addEventListener("click", async () => {
     await fetch(`/api/sorties/${sortie.id}/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ logged_by: "gerry" }),
+      body: JSON.stringify({ engine_stop_utc: readTimeEntryField("stop-engine"), logged_by: "gerry" }),
     });
     await refreshSortieInfo(tailNumber);
     await refreshSortieEvents(tailNumber);
@@ -664,6 +723,7 @@ async function addWaypoint(tailNumber, sortieId) {
     raw_input: rawInput,
     latitude: lat ? parseFloat(lat) : null,
     longitude: lon ? parseFloat(lon) : null,
+    time_utc: readTimeEntryField("wp"),
     logged_by: "gerry",
   };
   if (waypointType === "ops_check") {
@@ -776,6 +836,36 @@ document.getElementById("locate-btn").addEventListener("click", () => {
 });
 document.getElementById("locate-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") locate(e.target.value);
+});
+
+// ── Rapid callsign/tail lookup (REQUIREMENTS.md 3.3, added 2026-09-13) ──────
+// Per Gerry: working comms, a radio call gives callsign first, and the aircraft
+// may not have a live position yet (pilot often doesn't call in until minutes
+// after engine start, sometimes not until airborne and clear of the field) --
+// so this has to work by callsign/tail alone, not by clicking a map icon or
+// sidebar row that requires a live position to exist first. openSortiePanel()
+// already tolerates no live position (falls back to the tail number for
+// display), so the only missing piece was resolving the typed ident to a tail.
+async function jumpToAircraft(query) {
+  query = query.trim();
+  if (!query) return;
+  const res = await fetch("/api/aircraft/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idents: [query] }),
+  });
+  const matches = await res.json();
+  if (matches.length === 0) {
+    alert(`No known aircraft matches "${query}" (not tracked yet -- add it via the roster upload first).`);
+    return;
+  }
+  openSortiePanel(matches[0].tail_number);
+}
+document.getElementById("jump-input").addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter") return;
+  await jumpToAircraft(e.target.value);
+  e.target.value = "";
+  e.target.blur(); // give focus back to the map/keyboard shortcuts rather than leaving it in the box
 });
 
 // ── Special Use Airspace (REQUIREMENTS.md 3.2) ──────────────────────────────

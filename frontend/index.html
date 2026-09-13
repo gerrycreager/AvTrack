@@ -135,6 +135,11 @@
       background: #2b6cb0; color: white; cursor: pointer; font-size: 12px;
     }
     #sortie-panel .sortie-action-btn.stop { background: #a8460a; }
+    #sortie-panel .now-btn {
+      padding: 3px 4px; border-radius: 3px; border: 1px solid #2b6cb0; background: transparent;
+      color: #6fa8dc; cursor: pointer; font-size: 10px;
+    }
+    #sortie-panel .now-btn:hover { background: #2b6cb0; color: white; }
     #sortie-panel .sortie-summary-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: #cdd3d8; }
     #sortie-panel .sortie-divider { border-top: 1px solid #3a4048; margin: 10px 0; }
     #sortie-panel .waypoint-row { background: #262b31; border-radius: 4px; padding: 5px 8px; margin-bottom: 5px; font-size: 11px; }
@@ -154,6 +159,8 @@
     <input id="locate-radius" type="number" min="0" step="1" value="10" title="Operations area radius" />
     <span style="color:#ccc; align-self:center; font-size:12px;">nm</span>
     <button id="locate-btn">Go</button>
+    <span style="color:#666; align-self:center; font-size:14px; margin-left:6px;">|</span>
+    <input id="jump-input" placeholder="Callsign or tail — Enter" title="Jump straight to an aircraft's sortie panel, even before it has a live position" style="width:150px;" />
   </div>
   <div id="basemap-switcher">
     <select id="basemap-select">
