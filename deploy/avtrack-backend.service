@@ -1,0 +1,32 @@
+# AvTrack backend (FastAPI/uvicorn) on cosp1. Added 2026-09-13 after a real outage:
+# the backend had only ever been started manually via `nohup ... &`, which does not
+# survive a reboot. Gerry rebooted cosp1 for a software update, the backend never
+# came back, and r815's Apache reverse proxy (deploy/r815-avtrack.conf) started
+# returning 503 Service Unavailable to anyone hitting the public URL -- a real user-
+# facing outage caused purely by not having this as a real service. Restart=always
+# + WantedBy=multi-user.target fixes both the "survives reboot" and "survives a
+# crash" cases.
+#
+# Install (one-time, on cosp1):
+#   sudo cp avtrack-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now avtrack-backend
+
+[Unit]
+Description=AvTrack backend (FastAPI/uvicorn)
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=gerry
+WorkingDirectory=/home/gerry/CAP/AvTrack/backend
+ExecStart=/home/gerry/CAP/AvTrack/backend/.venv/bin/uvicorn app.main:app --host 192.168.0.57 --port 8000 --app-dir .
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
