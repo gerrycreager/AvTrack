@@ -130,6 +130,13 @@ class EventType(str, enum.Enum):
     touch_and_go = "touch_and_go"
     landing = "landing"
     engine_stop = "engine_stop"
+    # Sortie waypoint check-ins (REQUIREMENTS.md 3.3, added 2026-09-13) -- these
+    # timestamps go through the same TrackingEvent/EventEdit append-only + overlay
+    # mechanism as everything else here, per Gerry's explicit preference over a
+    # separate/simpler mechanism just for these.
+    in_grid = "in_grid"
+    out_grid = "out_grid"
+    ops_check = "ops_check"
 
 
 class DetectionMethod(str, enum.Enum):
@@ -179,6 +186,88 @@ class EventEdit(Base):
     edited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     event: Mapped["TrackingEvent"] = relationship(back_populates="edits")
+
+
+class WaypointLocationMethod(str, enum.Enum):
+    """How a SortieWaypoint's location was entered. Bearing/radial-from-navaid and
+    FAA-fix lookup are deferred (REQUIREMENTS.md 3.3, 2026-09-13 decision) -- both
+    need a reference dataset (FAA NASR navaid/fix data) not yet imported."""
+
+    latlon = "latlon"
+    mgrs = "mgrs"
+    named_point = "named_point"  # free-text place name ("over Smithville"), lat/lon entered manually
+
+
+class Sortie(Base):
+    """One sortie: engine start to engine stop (REQUIREMENTS.md 3.3, added
+    2026-09-13 per Gerry, modeled on the RPP recorded-times spreadsheet CAP already
+    uses). A new takeoff/landing/touch-and-go without an intervening engine stop is
+    the *same* sortie, not a new one -- engine_stop_event_id stays null while a
+    sortie is still in progress.
+
+    Metadata (PIC, sortie/mission number) lives directly on this row -- not
+    safety-critical in the same way a timestamp is, so no audit-trail overlay for
+    these. The start/stop *times* are different: they're backed by the existing
+    TrackingEvent/EventEdit append-only + correction-overlay mechanism (per Gerry's
+    explicit preference) rather than plain fields here, so those specific
+    corrections go through the same audit trail as every other tracked event."""
+
+    __tablename__ = "sorties"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    aircraft_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("aircraft.id"), index=True)
+    sortie_number: Mapped[int | None] = mapped_column()
+    # "Global variable for a given session" (Gerry) is a frontend convenience
+    # (pre-fills new-sortie forms) -- stored per-sortie here so each record is
+    # self-contained even if the convenience default changes mid-day.
+    mission_number: Mapped[str | None] = mapped_column(String(50))
+    pic_name: Mapped[str | None] = mapped_column(String(100))
+    engine_start_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
+    engine_stop_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    aircraft: Mapped["Aircraft"] = relationship()
+    engine_start_event: Mapped["TrackingEvent | None"] = relationship(
+        foreign_keys=[engine_start_event_id], lazy="selectin"
+    )
+    engine_stop_event: Mapped["TrackingEvent | None"] = relationship(
+        foreign_keys=[engine_stop_event_id], lazy="selectin"
+    )
+    waypoints: Mapped[list["SortieWaypoint"]] = relationship(back_populates="sortie", lazy="selectin")
+
+
+class SortieWaypoint(Base):
+    """An in-grid/out-grid/operations-check entry within a sortie (REQUIREMENTS.md
+    3.3, added 2026-09-13 per Gerry). Repeatable per sortie -- e.g. multiple grids
+    searched, or periodic ops checks, not just one of each. `waypoint_type` (which
+    of in_grid/out_grid/ops_check this is) lives on the linked TrackingEvent, not
+    duplicated here. `raw_input`/`location_method` preserve exactly what the user
+    entered even after resolving to lat/lon for map display (accountability).
+
+    `altitude_ft`/`fuel_remaining_hours`/`fuel_remaining_minutes`/`comments` are
+    Operations Check-specific (per Gerry, 2026-09-13) -- left null for in_grid/
+    out_grid entries, which only carry a location. `comments` is Text, not a
+    bounded VARCHAR, per Gerry: "nominally ~200 chars but could be longer, and
+    might eventually need an even bigger free-text block" -- a bounded column
+    already caused a real truncation crash once this session (SpecialUseAirspace's
+    times_of_use), not repeating that here."""
+
+    __tablename__ = "sortie_waypoints"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    sortie_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sorties.id"), index=True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tracking_events.id"))
+    location_method: Mapped[WaypointLocationMethod] = mapped_column(Enum(WaypointLocationMethod))
+    raw_input: Mapped[str] = mapped_column(String(200))
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    altitude_ft: Mapped[float | None] = mapped_column(Float)
+    fuel_remaining_hours: Mapped[int | None] = mapped_column()
+    fuel_remaining_minutes: Mapped[int | None] = mapped_column()
+    comments: Mapped[str | None] = mapped_column(Text)
+
+    sortie: Mapped["Sortie"] = relationship(back_populates="waypoints")
+    event: Mapped["TrackingEvent"] = relationship(lazy="selectin")
 
 
 class SpecialUseAirspace(Base):

@@ -104,3 +104,68 @@ class EventEditIn(BaseModel):
     new_value: str
     edited_by: str = "unknown"
     note: str | None = None
+
+
+class SortieCreateIn(BaseModel):
+    """Starts a new sortie -- creates the engine_start TrackingEvent under the hood.
+    See REQUIREMENTS.md 3.3."""
+
+    sortie_number: int | None = None
+    mission_number: str | None = None
+    pic_name: str | None = None
+    engine_start_utc: datetime | None = None  # defaults to server-now, same as EventCreateIn
+    logged_by: str = "unknown"
+
+
+class SortieStopIn(BaseModel):
+    engine_stop_utc: datetime | None = None
+    logged_by: str = "unknown"
+
+
+class SortiePatchIn(BaseModel):
+    """Plain metadata edits -- not the audit-trailed start/stop times, see
+    Sortie's docstring for why those are different."""
+
+    sortie_number: int | None = None
+    mission_number: str | None = None
+    pic_name: str | None = None
+
+
+class WaypointCreateIn(BaseModel):
+    waypoint_type: str  # in_grid / out_grid / ops_check
+    location_method: str  # latlon / mgrs / named_point
+    raw_input: str
+    # Required for latlon and named_point; resolved server-side for mgrs.
+    latitude: float | None = None
+    longitude: float | None = None
+    time_utc: datetime | None = None
+    logged_by: str = "unknown"
+    # Operations Check-specific -- REQUIREMENTS.md 3.3, ignored for in_grid/out_grid.
+    altitude_ft: float | None = None
+    fuel_remaining_hours: int | None = None
+    fuel_remaining_minutes: int | None = None
+    comments: str | None = None
+
+
+class WaypointOut(BaseModel):
+    id: UUID
+    waypoint_type: str
+    time_utc: datetime
+    location_method: str
+    raw_input: str
+    latitude: float
+    longitude: float
+    altitude_ft: float | None
+    fuel_remaining_hours: int | None
+    fuel_remaining_minutes: int | None
+    comments: str | None
+
+
+class SortieOut(BaseModel):
+    id: UUID
+    sortie_number: int | None
+    mission_number: str | None
+    pic_name: str | None
+    engine_start_utc: datetime | None
+    engine_stop_utc: datetime | None
+    waypoints: list[WaypointOut]

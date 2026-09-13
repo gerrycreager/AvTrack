@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.adsb.adsb_lol import AdsbLolProvider
 from app.adsb.flightaware import FlightAwareProvider
-from app.api import aircraft, airfields, airspace, events, gis, locate, swim, ws
+from app.api import aircraft, airfields, airspace, events, gis, locate, sorties, swim, ws
 from app.config import settings
 from app.db import init_db
 from app.ingestion.poller import run_poll_loop
@@ -37,6 +37,7 @@ app.include_router(airspace.router)
 app.include_router(events.router)
 app.include_router(gis.router)
 app.include_router(locate.router)
+app.include_router(sorties.router)
 app.include_router(swim.router)
 app.include_router(ws.router)
 
