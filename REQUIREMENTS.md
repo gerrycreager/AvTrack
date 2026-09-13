@@ -197,6 +197,67 @@ is reusable as the Phase 2 server's schema — not thrown away.
   fact, but the system must retain an immutable underlying tracking log — i.e. edits
   are corrections layered over raw data, not overwrites. This implies an audit trail
   / event-sourcing style log, not just a mutable "flights" row.
+- **Sortie tracking — shipped 2026-09-13 (backend only, no UI yet)**: PIC, sortie
+  number, mission number, engine start/stop, and repeatable in-grid/out-grid/
+  Operations Check waypoints, modeled directly on the RPP recorded-times
+  spreadsheet CAP already uses for this (`~gerry/CAP/AvTrack` on r815, see e.g.
+  `RPP recorded times - KBAK -- 26-1 example.xlsm`; that file's per-row columns —
+  Callsign/Instructor/Sortie/Dest/Eng Start/Wheels Up/Wheels Down/Eng Stop — mapped
+  directly to this design, with "Instructor" generalized to a single "PIC" field
+  per Gerry: "for the RPP this is 'instructor' but normally it'd be PIC... we can
+  go with one 'Pilot in Command'... and let the user adapt for edge cases").
+  Design decisions (all confirmed with Gerry before building):
+  - **Engine start/stop reuse TrackingEvent/EventEdit** (the existing append-only +
+    correction-overlay audit trail), not plain fields on the new `Sortie` table —
+    Gerry's explicit preference, consistent with this section's established
+    "immutable log, edits layered on top" principle. `Sortie.engine_start_event_id`/
+    `engine_stop_event_id` are nullable FKs; `engine_stop_event_id` stays null while
+    a sortie is in progress — **a new takeoff/landing/touch-and-go without an
+    intervening engine stop is the same sortie, not a new one** (per Gerry).
+  - **In-grid/out-grid/Operations Check are a repeatable list** (`SortieWaypoint`,
+    one row per check-in), not fixed one-each fields — a sortie can log multiple
+    grids searched or periodic ops checks. Each waypoint's *timestamp* also goes
+    through TrackingEvent/EventEdit (new `EventType` values `in_grid`/`out_grid`/
+    `ops_check`); its *location* fields live on `SortieWaypoint` itself since
+    TrackingEvent has no location fields.
+  - **Location entry, phase 1 of 2**: lat/lon, MGRS (server-side conversion via the
+    `mgrs` package, already a dependency from `app/api/locate.py`), or a free-text
+    "named point" (e.g. "over Smithville" — user enters approximate lat/lon
+    manually since there's no gazetteer yet). **Deferred**: bearing/radial-from-
+    navaid and "recognized FAA fix" lookup both need a reference dataset AvTrack
+    doesn't have yet (FAA NASR navaid and fix data, a separate import similar to
+    `scripts/import_nasr_airfields.py` / `import_sua_airspace.py`) — build that
+    import first if/when those two input modes are wanted.
+  - **Operations Check carries extra fields** (2026-09-13, added after the initial
+    design): altitude, fuel remaining as separate hours/minutes integers (not a
+    parsed "HH:MM" string), and a comments field. `comments` is `Text`, not a
+    bounded `VARCHAR` — Gerry: "nominally ~200 varchar but could be [longer]... we
+    might need an even larger free-text comment block eventually" — a bounded
+    column already caused a real truncation crash once this session
+    (`SpecialUseAirspace.times_of_use`), not repeating that mistake here.
+  - **Mission number format, unresolved**: per Gerry, CAP mission numbers follow
+    `YY-X-NNNN` (2-digit year, a single mission-type designator like T/1/A, 4-digit
+    sequence), "per CAPR 70-1 (I think)". Searched CAPR 70-1 (2008 text,
+    `~gerry/CAP/Air Operations/R_701_with_ICL_2008_Incorporated...pdf`) and CAPR
+    60-3 (`~gerry/CAP/Publications/Regulations/R_603...pdf`, turned out to be
+    Cadet Programs, unrelated) — neither contains the mission-numbering scheme
+    text, so the exact format/designator list is **not independently verified
+    against a located regulation**. `mission_number` is currently a free-text
+    field with no format validation at all (not even the soft/advisory check this
+    should probably get) — add real validation once the correct source document is
+    found, or Gerry confirms the format directly.
+  - **API**: `app/api/sorties.py` — `POST`/`GET /api/aircraft/{tail}/sorties`,
+    `GET .../sorties/current` (most recent sortie if still in progress, else
+    `null`), `POST /api/sorties/{id}/stop`, `PATCH /api/sorties/{id}` (metadata
+    only), `POST /api/sorties/{id}/waypoints`.
+  - **Not yet built**: any frontend UI at all (the plan is to open this from
+    clicking an aircraft icon or its sidebar datablock row — both already route to
+    `openSortiePanel()`, so no new click-handling needed, just new panel content);
+    a mission-specific callsign/tail roster upload (Gerry, 2026-09-13: "now that we
+    can see almost any CAP aircraft [via adsb.lol], we need to have a way to upload
+    callsigns for a specific mission" — distinct from the existing monthly
+    wing-wide `scripts/import_callsign_tails.py` CSV, scoped to one mission/
+    exercise instead; Gerry to provide a real CSV).
 
 ### 3.4 Weather
 - MRMS composite reflectivity and velocity overlay.
