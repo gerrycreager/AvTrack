@@ -32,6 +32,15 @@ class TrackedListIn(BaseModel):
     idents: list[str]
 
 
+class RosterUploadOut(BaseModel):
+    """Result of a mission-specific roster CSV upload (REQUIREMENTS.md 3.1, added
+    2026-09-13) -- additive only, never deactivates existing tracked aircraft (per
+    Gerry: "for now add/supplement... we will eventually get a roster")."""
+
+    added_or_updated: int
+    unusual_suffix_tails: list[str]
+
+
 class AirfieldOut(BaseModel):
     id: UUID
     icao_id: str | None

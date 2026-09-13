@@ -940,6 +940,33 @@ document.getElementById("gis-upload-btn").addEventListener("click", async () => 
   await refreshGisLayerList();
 });
 
+// ── Mission roster upload (REQUIREMENTS.md 3.1, added 2026-09-13) ───────────
+// Additive-only -- see app/api/aircraft.py upload_roster docstring. Distinct from
+// the standing monthly wing-wide import (scripts/import_callsign_tails.py, a CLI
+// script, not web-exposed).
+document.getElementById("roster-upload-btn").addEventListener("click", async () => {
+  const input = document.getElementById("roster-upload-input");
+  const status = document.getElementById("roster-upload-status");
+  const file = input.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append("file", file);
+  status.textContent = "Uploading…";
+  const res = await fetch("/api/aircraft/roster", { method: "POST", body: formData });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    status.textContent = `Failed: ${err.detail || res.statusText}`;
+    return;
+  }
+  const result = await res.json();
+  input.value = "";
+  status.textContent = `Added/updated ${result.added_or_updated}.`;
+  if (result.unusual_suffix_tails.length > 0) {
+    status.textContent += ` Note unusual suffix: ${result.unusual_suffix_tails.join(", ")}`;
+  }
+  await loadKnownAircraft(); // additive -- newly-uploaded tails stop showing as "unlisted"
+});
+
 map.on("load", refreshAirfields);
 map.on("moveend", scheduleAirfieldsRefresh); // covers both pan and zoom (zoom-only still fires moveend)
 map.on("zoom", updateLabelFilter); // instant label-tier feedback, ahead of the debounced bbox refetch
