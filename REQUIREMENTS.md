@@ -262,11 +262,28 @@ is reusable as the Phase 2 server's schema — not thrown away.
     matching the existing `window.map` debug-hook pattern. Verified end-to-end via
     Playwright: start → add an in-grid (lat/lon) and an ops-check (MGRS +
     altitude/fuel/comments) waypoint → stop → panel correctly reverts.
-  - **Not yet built**: a mission-specific callsign/tail roster upload (Gerry,
-    2026-09-13: "now that we can see almost any CAP aircraft [via adsb.lol], we
-    need to have a way to upload callsigns for a specific mission" — distinct from
-    the existing monthly wing-wide `scripts/import_callsign_tails.py` CSV, scoped
-    to one mission/exercise instead; Gerry to provide a real CSV).
+  - **Mission-specific roster upload — shipped 2026-09-13**: `POST
+    /api/aircraft/roster` (small upload widget in the Aircraft Aloft panel) —
+    same CSV shape/upsert logic as `scripts/import_callsign_tails.py`
+    (tail_number/callsign/callsign_prefix), but web-exposed and
+    **additive-only**: unlike that script, never deactivates aircraft missing
+    from the upload. Per Gerry, 2026-09-13: "now that we can see almost any CAP
+    aircraft [via adsb.lol], we need to have a way to upload callsigns for a
+    specific mission" — and on additive-vs-replace: "for now add/supplement...
+    we will eventually get a roster" (i.e. a real mission-scoped roster concept,
+    separate from the standing monthly wing-wide list, is a future enhancement,
+    not this — this is a lightweight interim tool). Verified live: uploading
+    N184CP/CAP3318 and N718CP/CAP418 got them tracked and reporting immediately.
+  - **Idea, not yet implemented (Gerry, 2026-09-13)**: rather than only
+    manually-curated rosters, passively build one from real traffic — a
+    "discovery" feed watching adsb.lol for *any* `CAP\d+`-shaped callsign
+    nationally (not just tails already in our Aircraft table, which is all the
+    current bulk `/v2/reg/` poll does) over some arbitrary window (Gerry
+    suggested 10 days as an example), logging whatever callsign/tail pairs show
+    up as candidates. Would need a different query pattern than the current
+    per-cycle bulk lookup (e.g. `/v2/callsign/` with a wildcard/prefix, if
+    adsb.lol supports one — not yet checked) since this is "find anything CAP-
+    shaped" rather than "look up these specific known tails."
 
 ### 3.4 Weather
 - MRMS composite reflectivity and velocity overlay.
