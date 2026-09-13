@@ -47,17 +47,17 @@
        the map's fixed north-up orientation and CSS rotate()'s 0deg = unrotated
        convention -- main.js's `rotate(${heading_deg}deg)` needs no change. */
     .aircraft-dot {
-      width: 35px; height: 35px;
+      width: 40px; height: 40px;
       display: block;
       /* No CSS drop-shadow filter here -- the path itself carries its own white
          stroke outline instead (see AIRCRAFT_SVG in main.js). */
     }
     .aircraft-dot svg { width: 100%; height: 100%; display: block; }
     .aircraft-datablock {
-      /* left offset needs clearance past the icon's own width (35px) plus a visible
+      /* left offset needs clearance past the icon's own width (40px) plus a visible
          gap -- previously 15px, which sat *inside* the icon's footprint at any size
          above ~15px, crowding the two together. Found live 2026-09-13 per Gerry. */
-      position: absolute; left: 41px; top: -8px; font-size: 12pt; line-height: 1.25;
+      position: absolute; left: 46px; top: -8px; font-size: 12pt; line-height: 1.25;
       color: #e8eaed; background: rgba(20, 24, 28, 0.78); padding: 2px 5px; border-radius: 3px;
       white-space: nowrap; pointer-events: none; font-family: ui-monospace, monospace;
     }

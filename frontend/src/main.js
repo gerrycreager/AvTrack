@@ -16,7 +16,7 @@
 // fill="currentColor" so upsertMarker can still set per-aircraft color via
 // .style.color on the wrapping div; stroke="#ffffff" is a contrast outline
 // against dark/busy basemaps.
-const AIRCRAFT_ICON_SIZE = 35; // keep in sync with .aircraft-dot's width/height in index.html
+const AIRCRAFT_ICON_SIZE = 40; // keep in sync with .aircraft-dot's width/height in index.html
 const AIRCRAFT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${AIRCRAFT_ICON_SIZE}" height="${AIRCRAFT_ICON_SIZE}">
   <path d="M 50,14
            L 54.1,14
