@@ -160,6 +160,31 @@ is reusable as the Phase 2 server's schema — not thrown away.
   Same shadowing pattern as psql/curl/python3 elsewhere in this project, just via
   an env var instead of PATH this time.
 - Aircraft rendered as map icons with live position updates.
+- **MGRS precision-box visualization — shipped 2026-09-13**: a truncated-precision
+  MGRS/USNG locate query (fewer than 5 digits/axis) now returns and draws the actual
+  box that precision level represents, not just a single (possibly misleading)
+  point. Real incident that prompted this: Gerry entered `16S EJ` (0 digits/axis,
+  just the 100km grid square) expecting to land within ~20nm of a point he knew was
+  in that square; it's the SW-corner convention per the MGRS spec, and the actual
+  distance was 56.9nm — correct behavior, but surprising without seeing the box
+  that makes the ~141km-diagonal uncertainty visible. `app/api/locate.py`'s
+  `_precision_box()` computes all four corners via the `mgrs` library's UTM-level
+  `MGRSToUTM`/`UTMToMGRS` (each corner independently converted, not a naive lat/lon
+  bounding box — UTM grid squares aren't perfectly rectangular once reprojected).
+  Box size follows the MGRS digit-count convention exactly (0 digits/axis = 100km,
+  1 = 10km, 2 = 1km, 3 = 100m, 4 = 10m; 5 = 1m, where no box is drawn since it
+  wouldn't be visually meaningful). Frontend draws a dashed red polygon and uses
+  `fitBounds()` instead of a fixed-zoom `flyTo` so the whole box is visible.
+  **Real bug found and fixed along the way**: `setOpsArea`/`setMgrsBox` both
+  guarded map-readiness with `if (!map.isStyleLoaded()) map.once("load", retry)`.
+  `isStyleLoaded()` tracks whether currently-visible *tiles* have finished
+  loading, not whether the style is ready for new sources — it can sit at `false`
+  for seconds during completely normal use, well after the map's own one-time
+  `load` event has already fired. Once past that point, the deferred retry
+  registers for an event that will never fire again, and the feature silently
+  never appears — confirmed live (Gerry: "I looked and didn't see the MGRS box
+  either") before being traced to this. Fixed with a `mapStyleReady` flag set
+  exactly once by the map's real `load` event, never rechecked after.
 
 ### 3.3 Flight / Takeoff-Landing Logging
 - **Do not trust the ADS-B provider's own flight/sortie segmentation as ground truth.**
@@ -288,6 +313,22 @@ is reusable as the Phase 2 server's schema — not thrown away.
       timezone) for the cases where it genuinely is "right now." Left blank,
       it still means "use server-now," preserving the original quick-log
       behavior for when that's actually correct.
+  - **Standalone session Mission # + per-tail default PIC — shipped 2026-09-13**:
+    two related pre-fill conveniences, both feeding the Start Sortie form.
+    (1) A "Session Mission #" field in the layers panel, settable *before* opening
+    any aircraft's panel — previously the only way to set the session-level
+    mission-number default was to open a specific aircraft's Start Sortie form
+    first and type it there, per Gerry: "can I start the comms session and enter
+    the mission number somehow or does that have to be per-sortie?" Same
+    `localStorage` key as before, just exposed somewhere proactive. (2) The
+    mission-specific roster upload (3.1 above) now also accepts an optional
+    `pilot` or `instructor` column (either name), stored as
+    `Aircraft.default_pic_name`, pre-filling PIC for that tail — distinct from
+    the per-sortie `pic_name` actually logged, which stays independently
+    editable. Roster CSV column matching was also made case-insensitive while
+    touching that code — the original version required an exact-lowercase
+    header match, which would have silently treated a differently-cased column
+    as absent rather than erroring.
   - **End-of-operating-period comms log PDF — shipped 2026-09-13**: per Gerry,
     "missions can span days and there can be several operating periods per
     day" — at the end of one, a PDF of "the effective communications logs with
