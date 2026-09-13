@@ -51,6 +51,20 @@ is reusable as the Phase 2 server's schema — not thrown away.
 - Side panel: aircraft currently aloft, filtered to (a) the user's tracked list, or
   (b) any CAP aircraft entering the current operations area. Unlisted/unexpected CAP
   aircraft entering the area are visually highlighted.
+- **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
+  figure (datablock and side panel both), ATC-datablock-style. Computed in
+  `app/ingestion/poller.py` from consecutive real position deltas (altitude change
+  over elapsed time between an aircraft's new position and its previous one, ignored
+  if the previous point is >10 min stale), **not** read from any single provider's
+  native field — adsb.lol does expose one (`baro_rate`) but FlightAware's track
+  response and SWIM/FIXM don't, and per this project's established principle (3.3)
+  of not trusting/depending on a single provider-specific field where deriving our
+  own works uniformly, this is computed the same way regardless of source.
+  ±150 ft/min threshold before calling it climbing/descending rather than "level"
+  noise. Verified live against a real descending flight (N359CP, ~-540 fpm).
+  Known gap: the initial WebSocket snapshot sent on connect (`ws.py`
+  `_latest_known_positions()`) doesn't include trend yet — populates within one
+  poll cycle after connecting, not fixed since it's a minor/transient gap.
 - *Idea, not yet implemented (discussed 2026-09-13, explicitly "not a hard
   requirement")*: color-code aircraft icons by altitude using a ramp similar to
   ADS-B Exchange's, instead of (or alongside) the current known/unlisted color
