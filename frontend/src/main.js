@@ -356,12 +356,21 @@ function upsertMarker(pos) {
   marker._dot.style.transform = `rotate(${pos.heading_deg ?? 0}deg)`;
   // Datablock: callsign on one line, altitude/speed on the next -- ATC-style, per
   // Gerry's requirement that every airborne aircraft always shows this, not just on
-  // click (the click target is the sortie panel, see openSortiePanel).
+  // click (the click target is the sortie panel, see openSortiePanel). Climb/descent
+  // caret (per Gerry, 2026-09-13) sits right after altitude, matching real ATC
+  // datablock convention -- computed server-side from consecutive position deltas
+  // (app/ingestion/poller.py), not read from any single provider field.
   const alt = pos.altitude_ft != null ? Math.round(pos.altitude_ft) : "—";
   const gs = pos.ground_speed_kt != null ? Math.round(pos.ground_speed_kt) : "—";
-  marker._datablock.innerHTML = `<div class="cs">${pos.callsign ?? pos.tail_number}</div><div>${alt}ft ${gs}kt</div>`;
+  marker._datablock.innerHTML = `<div class="cs">${pos.callsign ?? pos.tail_number}</div><div>${alt}ft${verticalTrendArrow(pos.vertical_trend)} ${gs}kt</div>`;
 
   renderPanel();
+}
+
+function verticalTrendArrow(trend) {
+  if (trend === "climbing") return "▲";
+  if (trend === "descending") return "▼";
+  return ""; // "level", or unknown (e.g. no prior position yet to compare against)
 }
 
 function renderPanel() {
@@ -383,7 +392,7 @@ function renderPanel() {
       return `
         <div class="aircraft-row ${unlisted ? "unlisted" : ""}">
           <div class="callsign">${pos.callsign ?? pos.tail_number}${unlisted ? " ⚠" : ""}</div>
-          <div class="meta">${Math.round(pos.altitude_ft ?? 0)} ft · ${Math.round(pos.ground_speed_kt ?? 0)} kt</div>
+          <div class="meta">${Math.round(pos.altitude_ft ?? 0)} ft${verticalTrendArrow(pos.vertical_trend)} · ${Math.round(pos.ground_speed_kt ?? 0)} kt</div>
         </div>`;
     })
     .join("");
