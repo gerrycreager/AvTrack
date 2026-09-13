@@ -49,6 +49,13 @@ class Aircraft(Base):
     callsign_prefix: Mapped[str | None] = mapped_column(String(10), index=True)
     aircraft_type: Mapped[str | None] = mapped_column(String(20))
     wing: Mapped[str | None] = mapped_column(String(10))
+    # Pre-fills the PIC field on the Start Sortie form for this tail (REQUIREMENTS.md
+    # 3.3, added 2026-09-13, per Gerry: "build in the ability to read a column header
+    # with pilot (or instructor) and populate that with callsigns and tails"). A
+    # default, not a record of who actually flew -- the per-sortie pic_name on Sortie
+    # is still what's actually logged and is independently editable at Start Sortie
+    # time.
+    default_pic_name: Mapped[str | None] = mapped_column(String(100))
     active: Mapped[bool] = mapped_column(default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

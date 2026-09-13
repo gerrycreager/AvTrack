@@ -127,6 +127,7 @@ document.getElementById("basemap-select").addEventListener("change", (e) => {
 
 const markers = new Map(); // tail_number -> maplibregl.Marker
 const knownAircraft = new Set(); // tail_numbers from /api/aircraft -- see "unlisted" highlighting below
+const defaultPicByTail = new Map(); // tail_number -> default_pic_name, from roster upload's optional pilot/instructor column
 const latestByTail = new Map(); // tail_number -> last position payload, for the side panel
 
 // Airfield label tiering (simplified 2026-09-13 per Gerry -- "adjust later"):
@@ -293,7 +294,10 @@ async function loadKnownAircraft() {
   try {
     const res = await fetch("/api/aircraft");
     const rows = await res.json();
-    rows.forEach((a) => knownAircraft.add(a.tail_number));
+    rows.forEach((a) => {
+      knownAircraft.add(a.tail_number);
+      if (a.default_pic_name) defaultPicByTail.set(a.tail_number, a.default_pic_name);
+    });
   } catch (err) {
     console.error("Failed to load aircraft list", err);
   }
@@ -572,6 +576,18 @@ async function openSortiePanel(tailNumber) {
 const MISSION_NUMBER_KEY = "avtrack_session_mission_number";
 const WAYPOINT_TYPE_LABELS = { in_grid: "In-Grid", out_grid: "Out-Grid", ops_check: "Ops Check" };
 
+// Standalone session-level Mission # (REQUIREMENTS.md 3.3, added 2026-09-13) -- per
+// Gerry: "can I start the comms session and enter the mission number somehow or
+// does that have to be per-sortie?" This is the same localStorage key the Start
+// Sortie form already reads/writes, just exposed somewhere settable *before*
+// opening any specific aircraft's panel (previously the only way to set it was to
+// open an aircraft's panel and type it into that aircraft's Start Sortie form).
+const sessionMissionInput = document.getElementById("session-mission-number");
+sessionMissionInput.value = localStorage.getItem(MISSION_NUMBER_KEY) ?? "";
+sessionMissionInput.addEventListener("input", () => {
+  localStorage.setItem(MISSION_NUMBER_KEY, sessionMissionInput.value.trim());
+});
+
 async function refreshSortieInfo(tailNumber) {
   const container = document.getElementById("sortie-info");
   container.innerHTML = "<em>Loading…</em>";
@@ -592,11 +608,14 @@ async function refreshSortieInfo(tailNumber) {
 function renderStartSortieForm(tailNumber) {
   const container = document.getElementById("sortie-info");
   const savedMissionNumber = localStorage.getItem(MISSION_NUMBER_KEY) ?? "";
+  // Roster-upload default (optional pilot/instructor column), not a per-session
+  // memory like mission number -- each tail can have its own default PIC.
+  const defaultPic = defaultPicByTail.get(tailNumber) ?? "";
   container.innerHTML = `
     <h3>Start Sortie</h3>
     <div class="sortie-field"><label>Sortie #</label><input type="number" id="new-sortie-number" /></div>
     <div class="sortie-field"><label>Mission #</label><input type="text" id="new-mission-number" placeholder="YY-X-NNNN" value="${savedMissionNumber}" /></div>
-    <div class="sortie-field"><label>PIC</label><input type="text" id="new-pic-name" /></div>
+    <div class="sortie-field"><label>PIC</label><input type="text" id="new-pic-name" value="${defaultPic}" /></div>
     ${timeEntryFieldHtml("new-engine-start", "Eng Start")}
     <button class="sortie-action-btn" id="start-sortie-btn">Start Sortie</button>
   `;

@@ -11,6 +11,7 @@ class AircraftOut(BaseModel):
     callsign_prefix: str | None
     aircraft_type: str | None
     wing: str | None
+    default_pic_name: str | None
     active: bool
 
     model_config = {"from_attributes": True}

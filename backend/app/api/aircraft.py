@@ -59,9 +59,19 @@ async def upload_roster(file: UploadFile = File(...), session: AsyncSession = De
     SSH+CLI script run, and deliberately additive-only: unlike that script, this never
     deactivates aircraft missing from the upload. Per Gerry: "for now add/supplement...
     we will eventually get a roster" -- a real mission-scoped roster concept (separate
-    from the standing monthly wing-wide list) is a future enhancement, not this."""
+    from the standing monthly wing-wide list) is a future enhancement, not this.
+
+    Also accepts an optional `pilot` or `instructor` column (either name -- per Gerry,
+    2026-09-13, "build in the ability to read a column header with pilot (or
+    instructor)"), stored as Aircraft.default_pic_name -- pre-fills the PIC field on
+    that tail's Start Sortie form (app/api/sorties.py), not itself the record of who
+    actually flew. Column matching is case-insensitive (found live: the original
+    version required the CSV header to be exactly lowercase `tail_number` etc, which
+    would have silently treated a differently-cased header as absent) and blank/absent
+    values leave any existing default untouched rather than clearing it, matching this
+    endpoint's overall additive-only philosophy."""
     content = (await file.read()).decode("utf-8-sig")  # -sig: tolerate an Excel-exported BOM
-    rows = list(csv.DictReader(io.StringIO(content)))
+    rows = [{(k or "").strip().lower(): v for k, v in row.items()} for row in csv.DictReader(io.StringIO(content))]
 
     unusual_suffix_tails: list[str] = []
     existing = {a.tail_number: a for a in (await session.execute(select(Aircraft))).scalars()}
@@ -82,6 +92,10 @@ async def upload_roster(file: UploadFile = File(...), session: AsyncSession = De
         aircraft.callsign = callsign
         aircraft.callsign_prefix = (row.get("callsign_prefix") or "").strip().upper() or None
         aircraft.active = True
+
+        pic_name = (row.get("pilot") or row.get("instructor") or "").strip() or None
+        if pic_name:
+            aircraft.default_pic_name = pic_name
 
         if callsign:
             cs_row = existing_callsigns.get(callsign)
