@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.models import Aircraft, DetectionMethod, EventEdit, EventType, TrackingEvent
+from app.models import Aircraft, DetectionMethod, EventEdit, EventType, Sortie, TrackingEvent
 from app.schemas import EventCreateIn, EventEditIn, EventEditOut, EventOut
 
 router = APIRouter(tags=["events"])
@@ -24,6 +24,21 @@ async def _get_aircraft_or_404(tail_number: str, session: AsyncSession) -> Aircr
     if aircraft is None:
         raise HTTPException(404, f"No aircraft with tail number {tail_number.upper()}")
     return aircraft
+
+
+async def _find_open_sortie(aircraft_id, session: AsyncSession) -> Sortie | None:
+    """The aircraft's most recent sortie, if it hasn't had an engine_stop logged yet
+    -- same "in progress" definition as GET .../sorties/current (app/api/sorties.py).
+    Used to auto-attribute a newly-logged event to the right sortie (REQUIREMENTS.md
+    3.3, added 2026-09-14 per Gerry: "we need take-off and landing to a full stop
+    associated with a sortie")."""
+    result = await session.execute(
+        select(Sortie).where(Sortie.aircraft_id == aircraft_id).order_by(Sortie.created_at.desc()).limit(1)
+    )
+    sortie = result.scalar_one_or_none()
+    if sortie is None or sortie.engine_stop_event_id is not None:
+        return None
+    return sortie
 
 
 def _effective_time(event: TrackingEvent) -> datetime:
@@ -67,14 +82,30 @@ async def create_event(tail_number: str, body: EventCreateIn, session: AsyncSess
     except ValueError:
         raise HTTPException(422, f"Unknown event_type '{body.event_type}'") from None
 
+    sortie = await _find_open_sortie(aircraft.id, session)
+
     event = TrackingEvent(
         aircraft_id=aircraft.id,
+        sortie_id=sortie.id if sortie else None,
         event_type=event_type,
         event_time_utc=body.event_time_utc or datetime.now(timezone.utc),
         detected_by=DetectionMethod.manual,
         raw={"logged_by": body.logged_by},
     )
     session.add(event)
+    await session.flush()  # need event.id before referencing it from Sortie below
+
+    if sortie is not None:
+        # takeoff: first one wins (the sortie's actual departure). landing: latest
+        # wins -- covers "stop and go" (a real full stop immediately followed by
+        # another takeoff, same sortie) without needing to model multiple landings;
+        # per Gerry, misattribution there is "something that could be handled in
+        # edits," not something this write path needs to get perfect.
+        if event_type == EventType.takeoff and sortie.takeoff_event_id is None:
+            sortie.takeoff_event_id = event.id
+        elif event_type == EventType.landing:
+            sortie.landing_event_id = event.id
+
     await session.commit()
     await session.refresh(event, attribute_names=["edits"])
     return _to_event_out(event)

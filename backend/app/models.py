@@ -154,12 +154,20 @@ class DetectionMethod(str, enum.Enum):
 class TrackingEvent(Base):
     """Append-only. Never update event_time_utc or delete a row here once it exists --
     corrections go in EventEdit. This table alone is CAP's flight-time-of-record audit
-    trail (REQUIREMENTS.md 3.3/4)."""
+    trail (REQUIREMENTS.md 3.3/4).
+
+    `sortie_id` (added 2026-09-14 per Gerry: "we need take-off and landing to a full
+    stop associated with a sortie") links every event type to whichever sortie was
+    open on that aircraft when it was logged -- not just waypoints, which already had
+    this via SortieWaypoint. Nullable because not every event happens during an open
+    sortie (e.g. engine_start itself, logged before the Sortie row exists yet -- see
+    app/api/sorties.py create_sortie for the flush-then-link ordering)."""
 
     __tablename__ = "tracking_events"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     aircraft_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("aircraft.id"), index=True)
+    sortie_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("sorties.id"), index=True)
     airfield_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("airfields.id"))
     event_type: Mapped[EventType] = mapped_column(Enum(EventType))
     event_time_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -217,7 +225,20 @@ class Sortie(Base):
     these. The start/stop *times* are different: they're backed by the existing
     TrackingEvent/EventEdit append-only + correction-overlay mechanism (per Gerry's
     explicit preference) rather than plain fields here, so those specific
-    corrections go through the same audit trail as every other tracked event."""
+    corrections go through the same audit trail as every other tracked event.
+
+    `takeoff_event_id`/`landing_event_id` (added 2026-09-14 per Gerry: "we need
+    take-off and landing to a full stop associated with a sortie") follow the exact
+    same pattern as engine_start/engine_stop. touch_and_go deliberately does NOT get
+    a slot here ("touch and go isn't a normal entry" -- Gerry) -- it's an ordinary
+    TrackingEvent attributed to this sortie via sortie_id, not a promoted milestone.
+    `landing_event_id` is updated to the *latest* landing logged, not just the
+    first -- covers the "stop and go" training case Gerry flagged (a real full stop
+    on the runway, immediately followed by another takeoff, same sortie, no engine
+    stop in between): each stop-and-go's landing overwrites this field, so it always
+    reflects the most recent one, with the understanding (per Gerry, "this is
+    something that could be handled in edits") that misattribution here is a manual
+    correction, not something the write path needs to solve perfectly."""
 
     __tablename__ = "sorties"
 
@@ -231,6 +252,8 @@ class Sortie(Base):
     pic_name: Mapped[str | None] = mapped_column(String(100))
     engine_start_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
     engine_stop_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
+    takeoff_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
+    landing_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     aircraft: Mapped["Aircraft"] = relationship()
@@ -240,7 +263,12 @@ class Sortie(Base):
     engine_stop_event: Mapped["TrackingEvent | None"] = relationship(
         foreign_keys=[engine_stop_event_id], lazy="selectin"
     )
+    takeoff_event: Mapped["TrackingEvent | None"] = relationship(foreign_keys=[takeoff_event_id], lazy="selectin")
+    landing_event: Mapped["TrackingEvent | None"] = relationship(foreign_keys=[landing_event_id], lazy="selectin")
     waypoints: Mapped[list["SortieWaypoint"]] = relationship(back_populates="sortie", lazy="selectin")
+    events: Mapped[list["TrackingEvent"]] = relationship(
+        foreign_keys="TrackingEvent.sortie_id", order_by="TrackingEvent.event_time_utc", lazy="selectin"
+    )
 
 
 class SortieWaypoint(Base):

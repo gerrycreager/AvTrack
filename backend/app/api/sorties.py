@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.events import _effective_time, _get_aircraft_or_404
+from app.api.events import _effective_time, _get_aircraft_or_404, _to_event_out
 from app.db import get_session
 from app.models import DetectionMethod, EventType, Sortie, SortieWaypoint, TrackingEvent, WaypointLocationMethod
 from app.schemas import SortieCreateIn, SortieOut, SortiePatchIn, SortieStopIn, WaypointCreateIn, WaypointOut
@@ -52,7 +52,10 @@ def _to_sortie_out(sortie: Sortie) -> SortieOut:
         pic_name=sortie.pic_name,
         engine_start_utc=_effective_time(sortie.engine_start_event) if sortie.engine_start_event else None,
         engine_stop_utc=_effective_time(sortie.engine_stop_event) if sortie.engine_stop_event else None,
+        takeoff_utc=_effective_time(sortie.takeoff_event) if sortie.takeoff_event else None,
+        landing_utc=_effective_time(sortie.landing_event) if sortie.landing_event else None,
         waypoints=[_to_waypoint_out(w) for w in sortie.waypoints],
+        events=[_to_event_out(e) for e in sortie.events],
     )
 
 
@@ -116,6 +119,8 @@ async def create_sortie(tail_number: str, body: SortieCreateIn, session: AsyncSe
         engine_start_event_id=start_event.id,
     )
     session.add(sortie)
+    await session.flush()  # need sortie.id before linking start_event back to it
+    start_event.sortie_id = sortie.id
     await session.commit()
     sortie = await _reload_sortie(sortie.id, session)
     return _to_sortie_out(sortie)
@@ -152,6 +157,7 @@ async def stop_sortie(sortie_id: str, body: SortieStopIn, session: AsyncSession 
     sortie = await _get_sortie_or_404(sortie_id, session)
     stop_event = TrackingEvent(
         aircraft_id=sortie.aircraft_id,
+        sortie_id=sortie.id,
         event_type=EventType.engine_stop,
         event_time_utc=body.engine_stop_utc or datetime.now(timezone.utc),
         detected_by=DetectionMethod.manual,
@@ -197,6 +203,7 @@ async def add_waypoint(sortie_id: str, body: WaypointCreateIn, session: AsyncSes
 
     event = TrackingEvent(
         aircraft_id=sortie.aircraft_id,
+        sortie_id=sortie.id,
         event_type=waypoint_type,
         event_time_utc=body.time_utc or datetime.now(timezone.utc),
         detected_by=DetectionMethod.manual,

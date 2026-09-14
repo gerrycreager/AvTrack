@@ -178,4 +178,7 @@ class SortieOut(BaseModel):
     pic_name: str | None
     engine_start_utc: datetime | None
     engine_stop_utc: datetime | None
+    takeoff_utc: datetime | None
+    landing_utc: datetime | None
     waypoints: list[WaypointOut]
+    events: list[EventOut]

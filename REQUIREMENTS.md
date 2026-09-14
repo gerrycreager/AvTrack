@@ -395,6 +395,74 @@ is reusable as the Phase 2 server's schema — not thrown away.
     per-cycle bulk lookup (e.g. `/v2/callsign/` with a wildcard/prefix, if
     adsb.lol supports one — not yet checked) since this is "find anything CAP-
     shaped" rather than "look up these specific known tails."
+  - **Takeoff/landing linked to their sortie + editable after stop — shipped
+    2026-09-14**, per Gerry: "we need take-off and landing to a full stop
+    associated with a sortie" and "if I end the sortie there's no way to edit
+    it?" (both true before this). Two real gaps, confirmed by reading the code,
+    not just reported symptoms:
+    - `TrackingEvent` had no link to `Sortie` at all except for `engine_start`/
+      `engine_stop` (via dedicated FK columns on `Sortie`) — takeoff, landing,
+      and touch-and-go were logged as ordinary events tied only to the
+      aircraft, with no way to tell which sortie a given one belonged to short
+      of guessing from timestamps, which breaks the moment an aircraft flies
+      more than one sortie a day (confirmed completely normal from the real
+      2026-09-14 WIMRS roster). Fixed: `TrackingEvent.sortie_id` (nullable FK),
+      auto-populated from whichever sortie is open on that aircraft when the
+      event is created — every event type, not just waypoints (which already
+      had this via `SortieWaypoint`). `Sortie` gained `takeoff_event_id`/
+      `landing_event_id`, same pattern as `engine_start_event_id`/
+      `engine_stop_event_id`. **touch_and_go deliberately does not get its own
+      slot** ("touch and go isn't a normal entry" — Gerry) — it's just an
+      ordinary event attributed to the sortie via `sortie_id`, since a sortie
+      can have zero, one, or several during pattern work. `landing_event_id` is
+      overwritten by the *latest* landing logged (not just the first) — covers
+      a "stop and go" (a real full stop, immediately followed by another
+      takeoff, no engine stop in between) without needing to model multiple
+      landings, on the understanding (Gerry: "that's something that could be
+      handled in edits") that this system isn't primarily meant to track
+      taxi-back/stop-and-go training — "I envision this one as used for
+      training missions where there's a lot of maneuvering and some
+      touch-and-go landings but really no taxi-back requirements." Migration
+      `b3ec32e22ace`.
+    - **Once a sortie's engine-stop was logged, there was no way to see or edit
+      it again** — `GET .../sorties/current` correctly returns `null` for a
+      stopped sortie, but the frontend's only response to `null` was to show
+      the *Start Sortie* form, with no path to a completed one. The backend's
+      `PATCH /api/sorties/{id}` already supported editing sortie #/mission #/
+      PIC regardless of stop state — nothing in the frontend ever called it.
+      Gerry: "I'm editing virtually every sortie in this current training
+      evolution," so this wasn't a rare edge case, it was the normal workflow,
+      silently broken. Fixed: a "Recent sorties" panel (collapsed `<details>`,
+      under the Start Sortie form) lists the last 5 completed sorties for that
+      tail (`GET /api/aircraft/{tail}/sorties`, filtered to ones with an
+      `engine_stop_utc`), each with an Edit toggle wired to the existing PATCH
+      endpoint. Takeoff/landing times now also show in the in-progress summary
+      and the recent-sorties list. **Real bug found while verifying this
+      live**: the NOW-button takeoff/landing buttons only refreshed the raw
+      event log (`refreshSortieEvents`), not the sortie summary
+      (`refreshSortieInfo`) — so logging a takeoff/landing didn't update its
+      own "Takeoff: —" / "Landing: —" display until the panel was closed and
+      reopened. Fixed by having `logEvent()` refresh both.
+    - **Landing-detection design refined, still R&D** (open question 3 below
+      updated with the concrete numbers): Gerry proposed light-GA stall speed
+      ≈57kt, groundspeed <40kt sustained 90s, or no ADS-B contact for 3min, as
+      the "landed" signal, and asked for literature on how other systems do
+      this. Checked the actual ingestion code first: `app/adsb/adsb_lol.py`
+      already reads `alt_baro == "ground"` — a direct decode of the aircraft's
+      own ADS-B surface-position squitter (when its transponder has a squat/
+      weight-on-wheels switch wired in), a known convention in the dump1090/
+      readsb family adsb.lol is built on. That's currently only used to zero
+      `altitude_ft`, not kept as a signal — it should be the *primary* landed
+      signal when present (stronger evidence than any speed threshold, since
+      it's the aircraft's own on-ground state, not inferred), with Gerry's
+      speed/duration rule as the fallback for installs that don't wire up that
+      switch. The "no contact for 3min ⇒ landed" fallback needs a corroborating
+      condition (already-low/descending altitude, near a known airfield)
+      before trusting it — bare silence during low-altitude maneuvering well
+      outside receiver-dense coverage is a normal, frequent event for CAP
+      training, not evidence of landing (this is the same crowdsourced-
+      coverage-gap point Gerry raised independently, and the same failure mode
+      already documented above for FlightAware's `landed` flag).
 
 ### 3.4 Weather
 - MRMS composite reflectivity and velocity overlay.
@@ -887,13 +955,52 @@ architecture (especially the Phase 2 server/pub-sub layer) is locked in:
       Note: ADS-B often has a brief data gap right at touchdown (antenna shadowing) —
       "signal gap near a runway, resumes shortly after" is itself a supporting signal,
       not just noise to ignore.
-   3. **Discriminator, evaluated in the ~20–90s window after the low point**:
+   3. **Discriminator, evaluated in the ~20–90s window after the low point** —
+      refined 2026-09-14 with concrete numbers from Gerry ("assume the stall speed
+      for our aircraft is 57 kts. If speed is below 40 kts for 90 sec... they have
+      almost certainly landed"), layered with a stronger signal found while
+      checking the ingestion code, and one caution on the silence-based fallback:
+      - **Primary signal, when present**: `app/adsb/adsb_lol.py` already reads
+        `alt_baro == "ground"` from the feed — a direct decode of the aircraft's
+        own ADS-B surface-position squitter (requires a squat/weight-on-wheels
+        switch wired to the transponder; a known convention in the dump1090/
+        readsb family adsb.lol is built on). This is the aircraft's own reported
+        on-ground state, not an inferred proxy — stronger evidence than any speed
+        threshold, and should decide "landed" outright (sustained across 2+
+        updates, to rule out a single bad report) whenever it's available. Not
+        currently kept as its own field (only used to zero `altitude_ft`) —
+        needs to be.
+      - **Fallback signal (installs without a squat switch, or gaps)**:
+        groundspeed sustained below ~40kt for ≥90s while at/near a runway is a
+        physically sound full-stop signal — 40kt is comfortably below stall
+        speed (~57kt reference) for CAP's fleet, so sustained flight at that
+        speed isn't possible; 90s is long enough to rule out a touch-and-go's
+        brief low-speed moment during the flare (typically re-accelerating
+        within 20–30s per the touch-and-go case below).
       - *Touch-and-go*: ground speed re-accelerates past rotation speed (~55–60 kt)
         within ~20–30s, altitude climbs continuously toward pattern altitude
         (500–1000 ft AGL), track stays aligned with runway heading.
-      - *Full stop*: ground speed stays at taxi speed (<20–30 kt) for >60–90s, and/or
+      - *Full stop*: ground speed stays at taxi speed (<40 kt) for >90s, and/or
         the track leaves the runway polygon onto a taxiway/ramp, and/or ADS-B stops
         entirely for several minutes with no re-climb (engine shutdown).
+      - **Signal loss ≥3min, evaluated with caution**: Gerry proposed "not seen
+        for 3 min ⇒ landed at the last visible position" as a fallback for gaps
+        in the primary/fallback signals above. Sound in principle, but needs a
+        corroborating condition (already low/descending altitude, near a known
+        airfield) before it's trusted alone — bare silence during low-altitude
+        maneuvering well outside receiver-dense coverage is a normal, frequent
+        event for CAP training (crowdsourced ADS-B has no universal coverage,
+        per Gerry), not evidence of landing on its own. This is the same failure
+        mode already documented above for trusting FlightAware's `landed` flag —
+        don't repeat it with silence as the new hard gate.
+      - **Out of scope for this system**: "stop and go" (a real full stop,
+        immediately followed by another takeoff, no engine stop, no taxi-back)
+        is not the primary use case here — per Gerry, "I envision this one as
+        used for training missions where there's a lot of maneuvering and some
+        touch-and-go landings but really no taxi-back requirements." Misfires on
+        that specific pattern are acceptable and correctable via the manual edit
+        workflow (see 3.3's sortie `landing_event_id`, which already assumes
+        this — latest-landing-wins, not modeled as multiple landings).
    4. **Go-around** (related, distinct case): no low-AGL/low-speed point is reached at
       all — climb resumes from a local minimum altitude, filtered to <2500 ft AGL.
 

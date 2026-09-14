@@ -142,6 +142,10 @@
     #sortie-panel .now-btn:hover { background: #2b6cb0; color: white; }
     #sortie-panel .sortie-summary-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: #cdd3d8; }
     #sortie-panel .sortie-divider { border-top: 1px solid #3a4048; margin: 10px 0; }
+    #sortie-panel .recent-sortie-row { background: #262b31; border-radius: 4px; padding: 8px; margin-bottom: 6px; }
+    #sortie-panel .edit-sortie-btn { background: none; border: 1px solid #3a4048; color: #cdd3d8; border-radius: 3px; font-size: 10px; padding: 2px 6px; cursor: pointer; }
+    #sortie-panel .edit-sortie-btn:hover { background: #2b6cb0; color: white; border-color: #2b6cb0; }
+    #sortie-panel .recent-sortie-edit { margin-top: 6px; padding-top: 6px; border-top: 1px solid #3a4048; }
     #sortie-panel .waypoint-row { background: #262b31; border-radius: 4px; padding: 5px 8px; margin-bottom: 5px; font-size: 11px; }
     #sortie-panel .waypoint-row .wp-type { font-weight: 600; text-transform: uppercase; margin-right: 6px; }
     #sortie-panel .waypoint-row .wp-meta { color: #9aa4ad; }
@@ -233,6 +237,11 @@
     </div>
 
     <div class="sortie-info" id="sortie-info"><em>Loading…</em></div>
+
+    <details>
+      <summary>Recent sorties (edit sortie #/mission #/PIC after the fact)</summary>
+      <div class="sortie-info" id="recent-sorties"><em>Loading…</em></div>
+    </details>
 
     <details>
       <summary>Raw event log (manual NOW-button logging)</summary>

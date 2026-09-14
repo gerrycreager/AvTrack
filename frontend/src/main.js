@@ -608,6 +608,7 @@ async function refreshSortieInfo(tailNumber) {
     } else {
       renderStartSortieForm(tailNumber);
     }
+    renderRecentSorties(tailNumber); // independent of in-progress/not -- always the last few completed ones
   } catch (err) {
     container.innerHTML = "<em>Failed to load sortie info.</em>";
     console.error(err);
@@ -650,6 +651,76 @@ function renderStartSortieForm(tailNumber) {
   });
 }
 
+// Past (already-stopped) sorties -- REQUIREMENTS.md 3.3, added 2026-09-14 per
+// Gerry: "if I end the sortie there's no way to edit it?" Once engine_stop_event_id
+// is set, GET .../sorties/current returns null and the panel falls back to the
+// Start Sortie form above with no way to see or fix a completed sortie's metadata,
+// even though PATCH /api/sorties/{id} already supported it server-side -- nothing in
+// the frontend ever called it. Gerry: "I'm editing virtually every sortie in this
+// current training evolution," so this isn't a rare case, it's the normal workflow.
+async function renderRecentSorties(tailNumber) {
+  const container = document.getElementById("recent-sorties");
+  if (!container) return;
+  container.innerHTML = "<em>Loading…</em>";
+  try {
+    const res = await fetch(`/api/aircraft/${tailNumber}/sorties`);
+    const sorties = (await res.json()).filter((s) => s.engine_stop_utc); // in-progress one (if any) is shown above instead
+    if (sorties.length === 0) {
+      container.innerHTML = "<em>No completed sorties yet.</em>";
+      return;
+    }
+    container.innerHTML = "";
+    for (const sortie of sorties.slice(0, 5)) {
+      const row = document.createElement("div");
+      row.className = "recent-sortie-row";
+      row.innerHTML = `
+        <div class="sortie-summary-row">
+          <span>Sortie #${sortie.sortie_number ?? "—"} · ${sortie.mission_number ?? "no mission #"}</span>
+          <button type="button" class="edit-sortie-btn">Edit</button>
+        </div>
+        <div class="sortie-summary-row"><span>PIC: ${sortie.pic_name ?? "—"}</span></div>
+        <div class="sortie-summary-row">
+          <span>Takeoff: ${sortie.takeoff_utc ? fmtInTz(sortie.takeoff_utc) : "—"}</span>
+          <span>Landing: ${sortie.landing_utc ? fmtInTz(sortie.landing_utc) : "—"}</span>
+        </div>
+        <div class="sortie-summary-row">
+          <span>Eng Start: ${fmtInTz(sortie.engine_start_utc)}</span>
+          <span>Eng Stop: ${fmtInTz(sortie.engine_stop_utc)}</span>
+        </div>
+        <div class="recent-sortie-edit" hidden>
+          <div class="sortie-field"><label>Sortie #</label><input type="number" class="edit-sortie-number" value="${sortie.sortie_number ?? ""}" /></div>
+          <div class="sortie-field"><label>Mission #</label><input type="text" class="edit-mission-number" value="${sortie.mission_number ?? ""}" /></div>
+          <div class="sortie-field"><label>PIC</label><input type="text" class="edit-pic-name" value="${sortie.pic_name ?? ""}" /></div>
+          <button type="button" class="sortie-action-btn save-sortie-btn">Save</button>
+        </div>
+      `;
+      const editPanel = row.querySelector(".recent-sortie-edit");
+      row.querySelector(".edit-sortie-btn").addEventListener("click", () => {
+        editPanel.hidden = !editPanel.hidden;
+      });
+      row.querySelector(".save-sortie-btn").addEventListener("click", async () => {
+        const sortieNumber = row.querySelector(".edit-sortie-number").value;
+        const missionNumber = row.querySelector(".edit-mission-number").value.trim();
+        const picName = row.querySelector(".edit-pic-name").value.trim();
+        await fetch(`/api/sorties/${sortie.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sortie_number: sortieNumber ? parseInt(sortieNumber, 10) : null,
+            mission_number: missionNumber || null,
+            pic_name: picName || null,
+          }),
+        });
+        renderRecentSorties(tailNumber);
+      });
+      container.appendChild(row);
+    }
+  } catch (err) {
+    container.innerHTML = "<em>Failed to load recent sorties.</em>";
+    console.error(err);
+  }
+}
+
 function renderInProgressSortie(tailNumber, sortie) {
   const container = document.getElementById("sortie-info");
   const waypointRows = sortie.waypoints
@@ -668,8 +739,9 @@ function renderInProgressSortie(tailNumber, sortie) {
 
   container.innerHTML = `
     <h3>Sortie In Progress</h3>
-    <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>${fmtInTz(sortie.engine_start_utc)}</span></div>
+    <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>Eng Start: ${fmtInTz(sortie.engine_start_utc)}</span></div>
     <div class="sortie-summary-row"><span>PIC: ${sortie.pic_name ?? "—"}</span><span>Mission: ${sortie.mission_number ?? "—"}</span></div>
+    <div class="sortie-summary-row"><span>Takeoff: ${sortie.takeoff_utc ? fmtInTz(sortie.takeoff_utc) : "—"}</span><span>Landing: ${sortie.landing_utc ? fmtInTz(sortie.landing_utc) : "—"}</span></div>
     ${timeEntryFieldHtml("stop-engine", "Eng Stop")}
     <button class="sortie-action-btn stop" id="stop-sortie-btn">Stop Sortie</button>
 
@@ -843,6 +915,11 @@ async function logEvent(tailNumber, eventType) {
     body: JSON.stringify({ event_type: eventType, logged_by: "gerry" }), // logged_by hardcoded until auth exists (REQUIREMENTS.md open question 7)
   });
   refreshSortieEvents(tailNumber);
+  // takeoff/landing now show in the "Sortie In Progress" summary (REQUIREMENTS.md
+  // 3.3, 2026-09-14) -- refresh that too, not just the raw event log below it, or
+  // logging a takeoff/landing silently doesn't update its own summary row until the
+  // panel is closed and reopened (found live while verifying this feature).
+  refreshSortieInfo(tailNumber);
 }
 
 document.getElementById("sortie-close").addEventListener("click", () => {
