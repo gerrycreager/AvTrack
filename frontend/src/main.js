@@ -130,14 +130,19 @@ const knownAircraft = new Set(); // tail_numbers from /api/aircraft -- see "unli
 const defaultPicByTail = new Map(); // tail_number -> default_pic_name, from roster upload's optional pilot/instructor column
 const latestByTail = new Map(); // tail_number -> last position payload, for the side panel
 
-// Airfield label tiering (simplified 2026-09-13 per Gerry -- "adjust later"):
-// tier 1 = military, tier 2 = any runway >=5000ft regardless of surface. See
-// app/api/airfields.py compute_tier(). `labelMinZoom` is precomputed per feature here
-// and applied via an imperative map.setFilter() on zoom change (see updateLabelFilter
-// below), rather than a GL style zoom-expression, to keep the logic in one
-// obviously-testable place.
-const TIER_MIN_ZOOM = { 1: 4, 2: 6 };
-const UNTIERED_MIN_ZOOM = 99; // effectively never -- dot still shows, just no persistent label
+// Airfield icon/label tiering (restored to a finer breakdown 2026-09-14 per Gerry:
+// "all the airport icons are noisy... use the same logic found on r815 EWMC to
+// display a graduated number of airfields based on zoom" -- ported from EWMC's
+// actual TIER_MIN_ZOOM there ({1:0, 2:3, 3:3, 4:7, 5:12}), collapsed from EWMC's
+// 5 tiers to AvTrack's computed 5 (see app/api/airfields.py compute_tier() for the
+// exact thresholds and why tier 5 exists here at all -- EWMC excludes those
+// airfields outright, AvTrack deliberately doesn't). Unlike the 2026-09-13
+// simplification, this now gates the DOT layer too, not just labels -- that's the
+// actual fix for "noisy," since dots previously always showed regardless of zoom
+// or tier. `minZoom` is precomputed per feature here and applied via an imperative
+// map.setFilter() on zoom change (see updateAirfieldZoomFilter below), rather than
+// a GL style zoom-expression, to keep the logic in one obviously-testable place.
+const TIER_MIN_ZOOM = { 1: 0, 2: 3, 3: 7, 4: 12, 5: 14 };
 
 let labelsVisible = true;
 let airfieldsFetchTimer = null;
@@ -157,16 +162,20 @@ function airfieldsToGeoJSON(rows) {
         hard_surface_available: a.hard_surface_available,
         is_military: a.is_military,
         tier: a.tier,
-        labelMinZoom: a.tier != null ? TIER_MIN_ZOOM[a.tier] : UNTIERED_MIN_ZOOM,
+        minZoom: TIER_MIN_ZOOM[a.tier] ?? 14,
       },
     })),
   };
 }
 
-function updateLabelFilter() {
-  if (!map.getLayer("airfields-label")) return;
+function updateAirfieldZoomFilter() {
+  if (!map.getLayer("airfields-layer")) return;
   const zoom = map.getZoom();
-  map.setFilter("airfields-label", ["<=", ["get", "labelMinZoom"], zoom]);
+  // Dots: gated by tier/zoom now too (this is the actual "noisy icons" fix --
+  // previously every airfield's dot always showed regardless of zoom or tier, only
+  // the label was zoom-gated).
+  map.setFilter("airfields-layer", ["<=", ["get", "minZoom"], zoom]);
+  map.setFilter("airfields-label", ["<=", ["get", "minZoom"], zoom]);
   map.setLayoutProperty("airfields-label", "visibility", labelsVisible ? "visible" : "none");
 }
 
@@ -233,7 +242,7 @@ async function refreshAirfields() {
           .addTo(map);
       });
     }
-    updateLabelFilter();
+    updateAirfieldZoomFilter();
   } catch (err) {
     console.error("Failed to load airfields", err);
   }
@@ -246,7 +255,7 @@ function scheduleAirfieldsRefresh() {
 
 document.getElementById("labels-toggle").addEventListener("change", (e) => {
   labelsVisible = e.target.checked;
-  updateLabelFilter();
+  updateAirfieldZoomFilter();
 });
 
 // Operations-area circle (REQUIREMENTS.md 3.2 locate-with-radius). Equirectangular
@@ -1174,7 +1183,7 @@ document.getElementById("generate-report-btn").addEventListener("click", () => {
 
 map.on("load", refreshAirfields);
 map.on("moveend", scheduleAirfieldsRefresh); // covers both pan and zoom (zoom-only still fires moveend)
-map.on("zoom", updateLabelFilter); // instant label-tier feedback, ahead of the debounced bbox refetch
+map.on("zoom", updateAirfieldZoomFilter); // instant dot+label tier feedback, ahead of the debounced bbox refetch
 map.on("load", refreshSua);
 map.on("moveend", scheduleSuaRefresh);
 map.on("load", refreshGisLayerList);
