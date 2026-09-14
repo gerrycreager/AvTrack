@@ -99,23 +99,41 @@ is reusable as the Phase 2 server's schema — not thrown away.
   2026-09-12 per a live-exercise request from KBAK/Columbus Muni). Not yet wired into
   the "aircraft entering the operations area" highlighting logic (3.1) -- currently
   visual only.
-- **Airfield labels — toggleable + tiered (shipped 2026-09-13)**: a checkbox
-  (`#labels-toggle`) turns airfield text labels on/off; airfield *dots* always show
-  regardless (situational-awareness dots for every known airfield, including turf/dirt
-  strips, aren't gated by the toggle). Label display is additionally tiered by zoom,
-  mirroring the convention already established in **CAP WxCOP's
-  `airport_tiers_endpoint.py`** (`/var/www/cap_winds_app` on r815 — Gerry pointed at
-  this as the reference to match): tier 1 = military (always labeled first, red dot),
-  tier 2 = paved runway ≥8000 ft, tier 3 = paved ≥5000 ft, tier 4 = paved ≥2500 ft,
-  untiered = dot only, never gets a persistent label (short/soft-field/unknown-data
-  strips). **Important nuance**: these are the same threshold numbers originally
-  proposed (by Gerry) as a CAPR 70-1 citation, then found (by research) not to be an
-  actual regulatory rule there — see open question 2 below. They're used here anyway
-  specifically *because* WxCOP already uses the identical thresholds as a practical
-  UX default for CAP pilots, independent of the CAPR mixup. Endpoint (`/api/airfields`)
-  is now bbox-filtered (`bounds=west,south,east,north`) and refetches on map
-  pan/zoom (debounced) rather than shipping all ~22k airfields in one response, which
-  also fixes an earlier scaling concern flagged when the endpoint was first built.
+- **Airfield icons/labels — toggleable + tiered by zoom (shipped 2026-09-13, revised
+  2026-09-14)**: a checkbox (`#labels-toggle`) turns airfield *text labels* on/off
+  independent of tiering. Both the icon (dot) layer and the label layer are tiered
+  by zoom. First shipped 2026-09-13 as a simplified 2-tier scheme with dots always
+  visible regardless of tier ("we can adjust later" per Gerry); revised 2026-09-14
+  after Gerry reported the map as noisy ("all the airport icons are noisy... use the
+  same logic found on r815 EWMC to display a graduated number of airfields based on
+  zoom"). Rather than reuse WxCOP's `airport_tiers_endpoint.py` thresholds (used by
+  the 09-13 version, and by coincidence identical to a CAPR 70-1 citation Gerry had
+  proposed that turned out not to be an actual regulatory rule — see open question 2
+  below), this revision reads **EWMC's actual live logic**
+  (`enhanced_weather_map_complete.html` on r815) directly, since that's the specific
+  page Gerry pointed at: a 5-tier scheme (tier 1 = military, tier 2 = paved runway
+  ≥8000 ft, tier 3 = paved ≥5000 ft, tier 4 = paved ≥2500 ft, tier 5 = everything
+  else — unpaved, short, or missing runway data), each tier gated by its own
+  `TIER_MIN_ZOOM` (`{1:0, 2:3, 3:7, 4:12, 5:14}` in AvTrack; EWMC's own values are
+  `{1:0, 2:3, 3:3, 4:7, 5:12}` but EWMC's tier 2 is a curated ~25-airport list plus a
+  METAR-reporting flag AvTrack doesn't have data for, so AvTrack's tier 2 is instead
+  computed the same paved/runway-length way as the others — collapsing EWMC's tiers
+  2+3 into one, hence AvTrack's numbers are pushed out a bit vs. EWMC's).
+  **Deliberate divergence from EWMC**: EWMC's underlying query requires
+  `has_paved_runway AND longest_runway_ft >= 2500` for an airfield to appear *at
+  all*, at any zoom — unpaved/short strips are permanently excluded there. Gerry
+  explicitly did not want that for AvTrack, since small/unpaved fields matter for
+  CAP ops, so tier 5 exists to eventually show everything EWMC would drop, just at
+  a deeper zoom (14) instead of never. Endpoint (`/api/airfields`) remains
+  bbox-filtered (`bounds=west,south,east,north`) and refetches on map pan/zoom
+  (debounced) rather than shipping all ~22k airfields in one response.
+  **Verification note**: tested via Playwright with a full 1.8s settle at each zoom
+  level (shorter waits race the debounced bbox refetch and produce nonsensical
+  results — a real pitfall hit twice while testing this). At zoom 6 over a real
+  Midwest bbox, rendered dots (64) matched tier1+tier2 from the source data (12+52)
+  exactly. At zoom 12/14 over a small-airfield-sparse test point, the *bbox fetch
+  itself* returned only 1/0 airfields total — confirming the near-zero render count
+  there is the shrinking viewport at high zoom, not the tier filter malfunctioning.
 - **Area of Operations (AO) / Area of Interest (AOI) — desirement, not yet built**:
   Gerry wants to be able to identify airfields within an AO and/or a (typically
   larger) AOI specifically for label purposes, selected either by (a) a list-input of
