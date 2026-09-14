@@ -585,6 +585,35 @@ async function openSortiePanel(tailNumber) {
 const MISSION_NUMBER_KEY = "avtrack_session_mission_number";
 const WAYPOINT_TYPE_LABELS = { in_grid: "In-Grid", out_grid: "Out-Grid", ops_check: "Ops Check" };
 
+// Mission number format -- advisory only, added 2026-09-14 per Gerry: fiscal year
+// (2 digits) - mission type (related to but not confirmed identical to the A/B/C
+// CAP Standard 72-2 Mission Symbol set -- Gerry: "I'll have to find" the exact
+// list) - a "quasi-serial" assigned when WMIRS approves the mission, i.e. not
+// necessarily a fixed-width sequential number. Neither CAPR 70-1 nor CAPR 60-3(I)
+// ("CAP Emergency Services Training and Operational Missions" -- the actual
+// regulation for this subject; CAPR 60-3 itself is a same-numbered but unrelated
+// Cadet Programs reg, confirmed by reading both directly) spells out this format
+// as a written rule -- it appears to be a WMIRS system convention, not a
+// regulatory requirement, so this deliberately WARNS on a mismatch rather than
+// blocking: a real WMIRS-assigned mission number using a designator character
+// nobody's seen yet must never be rejected by AvTrack.
+const MISSION_NUMBER_PATTERN = /^\d{2}-[A-Za-z0-9]-\d{3,5}$/;
+const MISSION_NUMBER_HINT_TEXT = "Doesn't look like YY-X-NNNN (fiscal year - mission type - sequence) -- saved as entered either way.";
+
+function wireMissionNumberHint(input, insertAfter = input) {
+  const hint = document.createElement("div");
+  hint.className = "mission-number-hint";
+  hint.textContent = MISSION_NUMBER_HINT_TEXT;
+  hint.hidden = true;
+  insertAfter.insertAdjacentElement("afterend", hint);
+  const update = () => {
+    const value = input.value.trim();
+    hint.hidden = value === "" || MISSION_NUMBER_PATTERN.test(value);
+  };
+  input.addEventListener("input", update);
+  update();
+}
+
 // Standalone session-level Mission # (REQUIREMENTS.md 3.3, added 2026-09-13) -- per
 // Gerry: "can I start the comms session and enter the mission number somehow or
 // does that have to be per-sortie?" This is the same localStorage key the Start
@@ -596,6 +625,7 @@ sessionMissionInput.value = localStorage.getItem(MISSION_NUMBER_KEY) ?? "";
 sessionMissionInput.addEventListener("input", () => {
   localStorage.setItem(MISSION_NUMBER_KEY, sessionMissionInput.value.trim());
 });
+wireMissionNumberHint(sessionMissionInput);
 
 async function refreshSortieInfo(tailNumber) {
   const container = document.getElementById("sortie-info");
@@ -630,6 +660,8 @@ function renderStartSortieForm(tailNumber) {
     <button class="sortie-action-btn" id="start-sortie-btn">Start Sortie</button>
   `;
   wireTimeEntryField("new-engine-start");
+  const newMissionNumberInput = document.getElementById("new-mission-number");
+  wireMissionNumberHint(newMissionNumberInput, newMissionNumberInput.closest(".sortie-field"));
   document.getElementById("start-sortie-btn").addEventListener("click", async () => {
     const sortieNumber = document.getElementById("new-sortie-number").value;
     const missionNumber = document.getElementById("new-mission-number").value.trim();
@@ -695,6 +727,8 @@ async function renderRecentSorties(tailNumber) {
         </div>
       `;
       const editPanel = row.querySelector(".recent-sortie-edit");
+      const editMissionNumberInput = row.querySelector(".edit-mission-number");
+      wireMissionNumberHint(editMissionNumberInput, editMissionNumberInput.closest(".sortie-field"));
       row.querySelector(".edit-sortie-btn").addEventListener("click", () => {
         editPanel.hidden = !editPanel.hidden;
       });
