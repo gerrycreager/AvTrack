@@ -142,7 +142,13 @@ const latestByTail = new Map(); // tail_number -> last position payload, for the
 // or tier. `minZoom` is precomputed per feature here and applied via an imperative
 // map.setFilter() on zoom change (see updateAirfieldZoomFilter below), rather than
 // a GL style zoom-expression, to keep the logic in one obviously-testable place.
-const TIER_MIN_ZOOM = { 1: 0, 2: 3, 3: 7, 4: 12, 5: 14 };
+// Tier 2 moved from minZoom 3 to 0 (2026-09-14, same day) per Gerry: "At min zoom
+// (all CONUS where we start) I'd display MIL and major air carrier hubs, then add
+// to those" -- previously tier 2 only started at zoom 3, which happened to be
+// under the map's default startup zoom (3.2) so it *looked* right on first load,
+// but zooming out further than that dropped major hubs while military stayed --
+// not the paired floor Gerry wants. Tiers 1 and 2 now share the same zoom-0 floor.
+const TIER_MIN_ZOOM = { 1: 0, 2: 0, 3: 7, 4: 12, 5: 14 };
 
 let labelsVisible = true;
 let airfieldsFetchTimer = null;
@@ -210,10 +216,14 @@ async function refreshAirfields() {
         type: "circle",
         source: "airfields",
         paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, 1.5, 10, 4, 14, 7],
+          // Sized up 2026-09-14 per Gerry: "the dots for the airfields displayed
+          // are too small to discern." The old scale (1.5px at zoom 5, clamped to
+          // that below zoom 5 -- MapLibre holds the first stop's value below its
+          // lowest zoom) was barely visible at the map's own 3.2 startup zoom.
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 3, 4, 6, 5, 10, 7, 14, 10],
           "circle-color": ["case", ["get", "is_military"], "#c0392b", "#8a6d3b"],
           "circle-stroke-color": "#fff",
-          "circle-stroke-width": 1,
+          "circle-stroke-width": 1.5,
         },
       });
       map.addLayer({
