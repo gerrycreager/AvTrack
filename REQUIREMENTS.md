@@ -397,6 +397,22 @@ is reusable as the Phase 2 server's schema — not thrown away.
     "nothing happened this period" rather than "your input was ambiguous."
     Fixed by explicitly treating naive input as UTC rather than leaving it to
     whatever the database driver does by default.
+    **Mission #/Sortie # added 2026-09-14** per Gerry: "we need to add the
+    mission number at the top and the sortie to each entry." Resolves through
+    `TrackingEvent.sortie_id` (added the same day for the sortie-linkage fix
+    above — a fortunate dependency, not planned together). The report spans an
+    arbitrary time range, not one mission, so more than one mission number can
+    legitimately appear in a single report (two aircraft on different missions
+    in the same operating period) — the header lists every distinct one
+    present rather than assuming exactly one. **Real bug caught by Gerry before
+    it shipped**: "the entry can be a single line under the header on the top
+    of each page" — a plain `Paragraph` in reportlab's `story` list only
+    renders once, so on a multi-page log the mission number would have
+    vanished after page 1. Fixed by moving the title/mission-number line out
+    of `story` and into a `draw_running_header()` callback wired to both
+    `onFirstPage` and `onLaterPages` in `doc.build()` — reportlab's actual
+    per-page mechanism, verified against a synthetic 7-page log (60 grouped
+    entries) that the header and page number repeat correctly on every page.
   - **Mission-specific roster upload — shipped 2026-09-13**: `POST
     /api/aircraft/roster` (small upload widget in the Aircraft Aloft panel) —
     same CSV shape/upsert logic as `scripts/import_callsign_tails.py`
