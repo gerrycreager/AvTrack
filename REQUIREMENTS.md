@@ -134,6 +134,30 @@ is reusable as the Phase 2 server's schema — not thrown away.
   exactly. At zoom 12/14 over a small-airfield-sparse test point, the *bbox fetch
   itself* returned only 1/0 airfields total — confirming the near-zero render count
   there is the shrinking viewport at high zoom, not the tier filter malfunctioning.
+  **Two follow-up fixes the same day, both from Gerry using the live map**:
+  - **Dots too small to discern**: `circle-radius` was `["interpolate", ..., 5, 1.5,
+    10, 4, 14, 7]` — MapLibre clamps to the first stop's value below its lowest
+    zoom, so at the map's own 3.2 startup zoom the dots were rendering at 1.5px.
+    Rescaled to `3, 4, 6, 5, 10, 7, 14, 10` and thickened the stroke to 1.5px.
+  - **Tier 2 ("major hub") criteria was wrong, not just the visuals**: Gerry:
+    "At min zoom (all CONUS where we start) I'd display MIL and major air carrier
+    hubs, then add to those," then after seeing the result: "it looks like you've
+    got a lot more displayed than just MIL and major hubs." Checked the actual
+    data rather than guess: the `paved >= 8000ft` proxy tier 2 had been using
+    (see above) rendered **334 airfields nationally**, not major hubs — Craig Fld
+    (former USAF pilot-training base), Southern California Logistics (former
+    George AFB, 13,052ft), Colorado Springs Muni (13,500ft, long because of
+    high-altitude density-altitude, not airline traffic), and 300+ more like
+    them. Runway length doesn't imply airline traffic. Replaced with FAA's own
+    hub classification (`Airfield.hub_type`, L/M/S/N, from the annual CY
+    Enplanements report — `scripts/import_faa_hub_classification.py`,
+    upsert-by-`faa_id`/Locid, 394/394 matched cleanly against the existing NASR
+    import): tier 2 is now Large + Medium hub (63 airports nationally, CY2024) —
+    a real, authoritative source, not a threshold guess. Also moved tier 2's
+    `TIER_MIN_ZOOM` from 3 to 0 (paired with tier 1 at the same floor, matching
+    "at min zoom... MIL and major air carrier hubs" as the intended baseline
+    together, not military-only until zoom 3). Dropped to 244 rendered dots
+    CONUS-wide at startup (from 529), all genuinely military or major-hub.
 - **Area of Operations (AO) / Area of Interest (AOI) — desirement, not yet built**:
   Gerry wants to be able to identify airfields within an AO and/or a (typically
   larger) AOI specifically for label purposes, selected either by (a) a list-input of

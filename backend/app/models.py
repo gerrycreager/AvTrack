@@ -102,6 +102,17 @@ class Airfield(Base):
     # app/api/airfields.py compute_tier(), matching the tiering convention already
     # established in CAP WxCOP's airport_tiers_endpoint.py.
     is_military: Mapped[bool] = mapped_column(default=False)
+    # FAA's own commercial-service hub classification (L/M/S/N -- Large/Medium/
+    # Small/Nonhub, by share of total US enplanements), from the annual CY
+    # Enplanements report -- see scripts/import_faa_hub_classification.py. Added
+    # 2026-09-14 to replace a "paved runway >= 8000ft" proxy for tier 2 ("major
+    # air carrier hub") after Gerry caught it live: that threshold actually pulled
+    # in 334 airfields nationally, most of them not hubs at all (former military
+    # fields, high-altitude GA fields needing longer runways, logistics/test
+    # strips) -- runway length alone doesn't mean airline traffic. Nullable: most
+    # airfields (GA/non-commercial) have no hub classification at all, which is a
+    # real, expected value here, not missing data.
+    hub_type: Mapped[str | None] = mapped_column(String(1))
 
 
 class PositionSource(str, enum.Enum):

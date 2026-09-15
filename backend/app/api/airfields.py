@@ -12,9 +12,16 @@ and label visibility, not just labels.
 
 Two real differences from EWMC, both deliberate:
 - EWMC's tier 2 ("major hub") is a curated list of ~25 named major airports plus a
-  "has_reporting" (METAR-station) flag AvTrack doesn't have -- collapsed here into a
-  single "paved >= 8000ft" tier computed the same way as the others, since AvTrack
-  has no equivalent curated/reporting data source.
+  "has_reporting" (METAR-station) flag AvTrack doesn't have. First approximated here
+  as "paved >= 8000ft" (2026-09-14) since AvTrack had no equivalent curated data --
+  but Gerry caught live that this actually renders 334 airfields nationally, most
+  NOT hubs (former military fields, high-altitude GA strips needing longer runways
+  purely for density-altitude reasons, logistics/test fields) -- runway length
+  doesn't imply airline traffic. Replaced same day with FAA's own authoritative hub
+  classification (`Airfield.hub_type`, from the annual CY Enplanements report --
+  see scripts/import_faa_hub_classification.py): Large + Medium hub (63 airports
+  nationally, CY2024) is tier 2. A cleaner source than EWMC's curated list, not a
+  worse approximation of it.
 - EWMC's underlying query requires `has_paved_runway AND longest_runway_ft >= 2500`
   for an airfield to appear AT ALL, at any zoom -- unpaved/short strips are
   permanently invisible there. Gerry explicitly did NOT want that for AvTrack
@@ -36,13 +43,17 @@ from app.schemas import AirfieldOut
 
 router = APIRouter(prefix="/api/airfields", tags=["airfields"])
 
+MAJOR_HUB_TYPES = {"L", "M"}  # FAA Large/Medium hub -- see module docstring
 
-def compute_tier(is_military: bool, hard_surface: bool | None, longest_runway_ft: float | None) -> int:
+
+def compute_tier(
+    is_military: bool, hard_surface: bool | None, longest_runway_ft: float | None, hub_type: str | None = None
+) -> int:
     """Every airfield gets a tier now (never None) -- see module docstring for why
     tier 5 exists instead of excluding these outright the way EWMC does."""
     if is_military:
         return 1
-    if hard_surface and longest_runway_ft and longest_runway_ft >= 8000:
+    if hub_type in MAJOR_HUB_TYPES:
         return 2
     if hard_surface and longest_runway_ft and longest_runway_ft >= 5000:
         return 3
@@ -57,7 +68,7 @@ async def list_airfields(
     max_tier: int | None = Query(
         None,
         description="Only return airfields at or above this tier "
-        "(1=military, 2=paved>=8000ft, 3=paved>=5000ft, 4=paved>=2500ft, 5=everything else); omit for all",
+        "(1=military, 2=FAA Large/Medium hub, 3=paved>=5000ft, 4=paved>=2500ft, 5=everything else); omit for all",
     ),
     session: AsyncSession = Depends(get_session),
 ):
@@ -75,7 +86,7 @@ async def list_airfields(
 
     out = []
     for a in airfields:
-        tier = compute_tier(a.is_military, a.hard_surface_available, a.longest_runway_ft)
+        tier = compute_tier(a.is_military, a.hard_surface_available, a.longest_runway_ft, a.hub_type)
         if max_tier is not None and tier > max_tier:
             continue
         point = to_shape(a.location)
