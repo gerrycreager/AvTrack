@@ -573,12 +573,23 @@ async function openSortiePanel(tailNumber) {
   document.getElementById("sortie-subtitle").textContent = tailNumber;
   panel.hidden = false;
 
+  // Shared time-entry field for the raw event log (added 2026-09-15 per Gerry:
+  // "I still don't see any way to enter wheels up (takeoff) or wheels down
+  // (landing) times" -- these buttons previously always logged server-now with
+  // no way to type the actual reported time, unlike engine start/stop (which
+  // already had time-entry fields elsewhere in the Start/Stop Sortie forms) and
+  // waypoints (which share one time field the same way this now does). Backend
+  // already supported an explicit event_time_utc (EventCreateIn) -- only the
+  // frontend never sent one for these event types.
+  document.getElementById("log-event-time-field").innerHTML = timeEntryFieldHtml("log-event", "Time");
+  wireTimeEntryField("log-event");
+
   const buttons = document.getElementById("sortie-log-buttons");
   buttons.innerHTML = "";
   for (const type of EVENT_TYPES) {
     const btn = document.createElement("button");
-    btn.textContent = `${type.replace(/_/g, " ")} — NOW`;
-    btn.addEventListener("click", () => logEvent(tailNumber, type));
+    btn.textContent = type.replace(/_/g, " ");
+    btn.addEventListener("click", () => logEvent(tailNumber, type, readTimeEntryField("log-event")));
     buttons.appendChild(btn);
   }
 
@@ -952,11 +963,15 @@ async function refreshSortieEvents(tailNumber) {
   }
 }
 
-async function logEvent(tailNumber, eventType) {
+async function logEvent(tailNumber, eventType, eventTimeUtc = null) {
   await fetch(`/api/aircraft/${tailNumber}/events`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ event_type: eventType, logged_by: "gerry" }), // logged_by hardcoded until auth exists (REQUIREMENTS.md open question 7)
+    body: JSON.stringify({
+      event_type: eventType,
+      event_time_utc: eventTimeUtc, // null = server-now, same as before this field existed
+      logged_by: "gerry", // hardcoded until auth exists (REQUIREMENTS.md open question 7)
+    }),
   });
   refreshSortieEvents(tailNumber);
   // takeoff/landing now show in the "Sortie In Progress" summary (REQUIREMENTS.md

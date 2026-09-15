@@ -355,6 +355,20 @@ is reusable as the Phase 2 server's schema — not thrown away.
       timezone) for the cases where it genuinely is "right now." Left blank,
       it still means "use server-now," preserving the original quick-log
       behavior for when that's actually correct.
+    - **Gap in that fix, found 2026-09-15**: "engine start, engine stop, and
+      every waypoint" above left out takeoff/touch-and-go/landing -- those
+      stayed NOW-only buttons with no time-entry field, so wheels-up/wheels-
+      down could only ever be logged as "whenever I happen to click the
+      button," never the actual reported time. Gerry: "I still don't see any
+      way to enter wheels up (takeoff) or wheels down (landing) times." Fixed
+      by giving the whole raw event-log button row one shared time-entry field
+      (same `timeEntryFieldHtml`/HHMM pattern, same "blank = server-now"
+      fallback) rather than one field per button, matching how the waypoint
+      form already shares a single time field across its 3 waypoint types.
+      Backend already supported `event_time_utc` on this endpoint
+      (`EventCreateIn`) -- only the frontend never sent one for these event
+      types. Verified live: typed `0130`, clicked takeoff, the logged event's
+      `effective_time_utc` was exactly `01:30Z`, not server-now.
   - **Standalone session Mission # + per-tail default PIC — shipped 2026-09-13**:
     two related pre-fill conveniences, both feeding the Start Sortie form.
     (1) A "Session Mission #" field in the layers panel, settable *before* opening
