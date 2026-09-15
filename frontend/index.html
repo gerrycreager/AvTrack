@@ -27,8 +27,13 @@
     #roster-upload-status { font-size: 10px; color: #9aa4ad; margin-bottom: 8px; min-height: 1.2em; }
     .aircraft-row { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; background: #262b31; font-size: 13px; }
     .aircraft-row.unlisted { background: #4a2a1a; border: 1px solid #d98a3d; }
-    .aircraft-row .callsign { font-weight: 600; }
+    .aircraft-row.state-not-reporting { opacity: 0.55; } /* loaded but quiet -- de-emphasize vs. live rows */
+    .aircraft-row .callsign { font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
     .aircraft-row .meta { color: #9aa4ad; font-size: 11px; }
+    .status-badge { font-size: 9px; font-weight: 700; letter-spacing: 0.03em; padding: 1px 5px; border-radius: 3px; }
+    .status-badge.status-airborne { background: #1f6b3a; color: #d6f5e0; }
+    .status-badge.status-ground { background: #3a4048; color: #cdd3d8; }
+    .status-badge.status-not-reporting { background: transparent; color: #6b7580; border: 1px solid #3a4048; }
     #locate-bar { position: absolute; top: 10px; left: 10px; z-index: 1; display: flex; gap: 6px; }
     #locate-bar input { padding: 6px 8px; border-radius: 4px; border: 1px solid #888; }
     #locate-bar input#locate-input { width: 220px; }

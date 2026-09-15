@@ -1,0 +1,37 @@
+# AvTrack passive CAP callsign/tail discovery (REQUIREMENTS.md 3.1, added
+# 2026-09-15). Per Gerry: "we can also capture CAP callsigns and tail numbers
+# from the live feed to populate the background list... let's start a multi-day
+# capture... you can set up a timed task to accomplish this. That said, r815
+# reboots daily at 0700 UTC so you might have to restart that task after the
+# reboot." Restart=always + WantedBy=multi-user.target handles both the crash
+# case and the reboot case -- same reasoning as avtrack-backend.service (that
+# one already caused a real outage from being started manually via nohup
+# instead of a real unit; this one is set up correctly from the start).
+#
+# Runs on cosp1 (where the backend/DB already are), not r815 -- the daily
+# reboot Gerry mentioned is r815's, not this host's, but the same lesson
+# (systemd, not nohup) applies regardless of which box it's on.
+#
+# Install (one-time, on cosp1):
+#   sudo cp avtrack-cap-discovery.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now avtrack-cap-discovery
+
+[Unit]
+Description=AvTrack passive CAP callsign/tail discovery (adsb.lol grid sweep)
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=gerry
+WorkingDirectory=/home/gerry/CAP/AvTrack
+ExecStart=/home/gerry/CAP/AvTrack/backend/.venv/bin/python3 scripts/discover_cap_callsigns.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

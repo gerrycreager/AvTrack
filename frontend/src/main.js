@@ -127,6 +127,7 @@ document.getElementById("basemap-select").addEventListener("change", (e) => {
 
 const markers = new Map(); // tail_number -> maplibregl.Marker
 const knownAircraft = new Set(); // tail_numbers from /api/aircraft -- see "unlisted" highlighting below
+const callsignByTail = new Map(); // tail_number -> callsign, so a loaded-but-not-yet-reporting tail still shows its callsign in the sidebar
 const defaultPicByTail = new Map(); // tail_number -> default_pic_name, from roster upload's optional pilot/instructor column
 const latestByTail = new Map(); // tail_number -> last position payload, for the side panel
 
@@ -316,7 +317,9 @@ async function loadKnownAircraft() {
     rows.forEach((a) => {
       knownAircraft.add(a.tail_number);
       if (a.default_pic_name) defaultPicByTail.set(a.tail_number, a.default_pic_name);
+      if (a.callsign) callsignByTail.set(a.tail_number, a.callsign);
     });
+    renderPanel(); // the roster itself just changed (e.g. after a roster upload) -- reflect it immediately
   } catch (err) {
     console.error("Failed to load aircraft list", err);
   }
@@ -414,26 +417,61 @@ function verticalTrendArrow(trend) {
   return ""; // "level", or unknown (e.g. no prior position yet to compare against)
 }
 
+// altitude_ft > 0 as "airborne" (2026-09-15, REQUIREMENTS.md 3.1) -- both
+// providers already normalize an on-ground report to altitude_ft=0.0 (see
+// app/adsb/adsb_lol.py's alt_baro=="ground" handling), so this reuses that
+// existing convention rather than a new one. An approximation, not physics --
+// good enough for "is it flying right now," not a safety-critical distinction.
+function airborneState(pos) {
+  return pos.altitude_ft != null && pos.altitude_ft > 0 ? "airborne" : "ground";
+}
+
+// Sidebar shows every LOADED tail (knownAircraft, from the roster), not just
+// ones currently transmitting -- added 2026-09-15 per Gerry: "we need to see
+// what aircraft are loaded, and if they're airborne. Once a set of tails is
+// loaded, it should be displayed." Previously the sidebar only ever showed
+// latestByTail (live positions), so a loaded-but-not-yet-reporting tail (e.g.
+// parked with the transponder off) was invisible until it started
+// broadcasting -- no way to confirm a roster upload actually took, short of
+// checking the API directly. Unlisted/unexpected aircraft (reporting live but
+// not in the roster) still show too, same red/⚠ treatment as before.
+const STATE_RANK = { airborne: 0, ground: 1, "not-reporting": 2 };
+const STATE_LABEL = { airborne: "AIRBORNE", ground: "ON GROUND", "not-reporting": "NOT REPORTING" };
+
 function renderPanel() {
   const list = document.getElementById("aircraft-list");
-  const rows = [...latestByTail.values()].sort((a, b) => a.tail_number.localeCompare(b.tail_number));
-  if (rows.length === 0) {
+  const tails = new Set([...knownAircraft, ...latestByTail.keys()]);
+  if (tails.size === 0) {
     // Distinguish "still connecting" from "connected, just no data yet" -- these look
     // identical to a viewer if both just say "Connecting..." forever, which is
     // actively misleading when e.g. ADS-B polling is paused server-side but the
     // WebSocket itself is fine. See REQUIREMENTS.md dev notes 2026-09-13.
     list.innerHTML = wsConnected
-      ? "<em>Connected — no aircraft reporting.</em>"
+      ? "<em>Connected — no aircraft loaded or reporting.</em>"
       : "<em>Connecting…</em>";
     return;
   }
+
+  const rows = [...tails].map((tail) => {
+    const pos = latestByTail.get(tail);
+    return { tail, pos, unlisted: !knownAircraft.has(tail), state: pos ? airborneState(pos) : "not-reporting" };
+  });
+  // Airborne first (most operationally relevant at a glance), then on-ground/
+  // live, then loaded-but-quiet -- alphabetical within each group.
+  rows.sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || a.tail.localeCompare(b.tail));
+
   list.innerHTML = rows
-    .map((pos) => {
-      const unlisted = !knownAircraft.has(pos.tail_number);
+    .map(({ tail, pos, unlisted, state }) => {
+      const callsign = pos?.callsign ?? callsignByTail.get(tail) ?? tail;
+      const meta = pos
+        ? `${Math.round(pos.altitude_ft ?? 0)} ft${verticalTrendArrow(pos.vertical_trend)} · ${Math.round(pos.ground_speed_kt ?? 0)} kt`
+        : tail; // not reporting -- show the tail number itself since callsign alone may not identify it
       return `
-        <div class="aircraft-row ${unlisted ? "unlisted" : ""}">
-          <div class="callsign">${pos.callsign ?? pos.tail_number}${unlisted ? " ⚠" : ""}</div>
-          <div class="meta">${Math.round(pos.altitude_ft ?? 0)} ft${verticalTrendArrow(pos.vertical_trend)} · ${Math.round(pos.ground_speed_kt ?? 0)} kt</div>
+        <div class="aircraft-row state-${state} ${unlisted ? "unlisted" : ""}">
+          <div class="callsign">${callsign}${unlisted ? " ⚠" : ""}
+            <span class="status-badge status-${state}">${STATE_LABEL[state]}</span>
+          </div>
+          <div class="meta">${meta}</div>
         </div>`;
     })
     .join("");

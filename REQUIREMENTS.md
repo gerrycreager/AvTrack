@@ -51,6 +51,20 @@ is reusable as the Phase 2 server's schema — not thrown away.
 - Side panel: aircraft currently aloft, filtered to (a) the user's tracked list, or
   (b) any CAP aircraft entering the current operations area. Unlisted/unexpected CAP
   aircraft entering the area are visually highlighted.
+  **Revised 2026-09-15** — the "tracked list" half of this was never actually
+  built (no persistent selection UI ever existed; the sidebar only ever showed
+  `latestByTail`, i.e. aircraft currently transmitting, full stop) — per Gerry:
+  "we need to see what aircraft are loaded, and if they're airborne. Once a set
+  of tails is loaded, it should be displayed." Rather than the original
+  aloft-only-filtered-by-a-list design, the sidebar now shows every tail in
+  `knownAircraft` (the full `/api/aircraft` roster — 29 tails currently, small
+  enough this doesn't need its own separate "tracked subset" concept) at all
+  times, each tagged AIRBORNE / ON GROUND / NOT REPORTING
+  (`altitude_ft > 0` from a live position = airborne, reusing the same
+  provider-normalized "ground" convention already established in
+  app/adsb/adsb_lol.py, rather than inventing a new one) — sorted airborne
+  first, then on-ground, then quiet. Unlisted/unexpected live traffic (not in
+  the roster) still gets the existing red/⚠ treatment, unchanged.
 - **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
   figure (datablock and side panel both), ATC-datablock-style. Computed in
   `app/ingestion/poller.py` from consecutive real position deltas (altitude change
@@ -456,16 +470,34 @@ is reusable as the Phase 2 server's schema — not thrown away.
     separate from the standing monthly wing-wide list, is a future enhancement,
     not this — this is a lightweight interim tool). Verified live: uploading
     N184CP/CAP3318 and N718CP/CAP418 got them tracked and reporting immediately.
-  - **Idea, not yet implemented (Gerry, 2026-09-13)**: rather than only
-    manually-curated rosters, passively build one from real traffic — a
-    "discovery" feed watching adsb.lol for *any* `CAP\d+`-shaped callsign
-    nationally (not just tails already in our Aircraft table, which is all the
-    current bulk `/v2/reg/` poll does) over some arbitrary window (Gerry
-    suggested 10 days as an example), logging whatever callsign/tail pairs show
-    up as candidates. Would need a different query pattern than the current
-    per-cycle bulk lookup (e.g. `/v2/callsign/` with a wildcard/prefix, if
-    adsb.lol supports one — not yet checked) since this is "find anything CAP-
-    shaped" rather than "look up these specific known tails."
+  - **Passive CAP callsign/tail discovery — shipped 2026-09-15**, the idea
+    proposed 2026-09-13 (directly below, kept for history) now built: per
+    Gerry, "we can also capture CAP callsigns and tail numbers from the live
+    feed to populate the background list. Won't be exhaustive but it will get
+    us more tails to work with. Let's start a multi-day capture... set up a
+    timed task." Checked the open question from the original idea first:
+    adsb.lol has **no wildcard/prefix callsign search** — confirmed live,
+    `/v2/callsign/CAP` returns zero results, it's exact-match only. So this
+    instead sweeps a fixed, coarse, non-exhaustive grid of 22 CONUS points
+    (biased toward populated/likely-CAP-active metro areas, not a gap-free
+    tiling) via `/v2/point/{lat}/{lon}/250`, one point per cycle, filtering
+    client-side for a CAP-shaped `flight` field (`^CAP\s?\d+$`). Matches land
+    in a new `discovered_callsigns` table (`Aircraft`-shaped candidates, NOT
+    auto-promoted into `Aircraft` itself — see that model's docstring) via
+    `scripts/discover_cap_callsigns.py`, running continuously as
+    `avtrack-cap-discovery.service` (systemd, `enabled`, `Restart=always` —
+    same reasoning as `avtrack-backend.service`'s real outage lesson, and
+    directly because Gerry flagged r815's daily 0700 UTC reboot as something
+    this needs to survive without a manual restart). Paced at 90s between
+    queries (adsb.lol's undocumented rate limit is aggressive — the existing
+    `/v2/reg/` bulk provider hit a hard 429 wall after just ~2 rapid calls —
+    so this trades sweep speed for reliability; a full 22-point pass takes
+    ~30min, comfortably fast enough across a multi-day capture). **Verified
+    live immediately on startup**: found real new CAP tails not yet in the
+    roster within the first two grid cycles (Seattle: N866CP/CAP3666,
+    N761CP/CAP3661; a third, N886CP/CAP3686, was already known) — confirming
+    both the matching logic and the "gets us more tails" premise work in
+    practice, not just in theory.
   - **Takeoff/landing linked to their sortie + editable after stop — shipped
     2026-09-14**, per Gerry: "we need take-off and landing to a full stop
     associated with a sortie" and "if I end the sortie there's no way to edit

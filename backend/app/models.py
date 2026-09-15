@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 
 from geoalchemy2 import Geometry
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, String, Text, func
+from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -365,3 +365,30 @@ class GisFeature(Base):
     properties: Mapped[dict | None] = mapped_column(JSON)
 
     layer: Mapped["GisLayer"] = relationship(back_populates="features")
+
+
+class DiscoveredCallsign(Base):
+    """A tail/callsign pair seen live on adsb.lol with a CAP-shaped callsign, not
+    already in `Aircraft` (REQUIREMENTS.md 3.1, added 2026-09-15) -- see
+    scripts/discover_cap_callsigns.py. Per Gerry: "we can also capture CAP
+    callsigns and tail numbers from the live feed to populate the background
+    list... won't be exhaustive but it will get us more tails to work with."
+
+    This is a *candidate* list, not auto-promoted into Aircraft -- a real tail
+    matching `^CAP\\d+$` almost always is CAP, but false positives are possible
+    (any operator can squawk anything) and Aircraft is the audited source of
+    truth other features key off of (roster upload, sortie tracking), so
+    promotion is a deliberate separate step, not automatic."""
+
+    __tablename__ = "discovered_callsigns"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    tail_number: Mapped[str] = mapped_column(String(10), index=True)
+    callsign: Mapped[str] = mapped_column(String(20))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sample_count: Mapped[int] = mapped_column(default=1)
+    last_latitude: Mapped[float | None] = mapped_column(Float)
+    last_longitude: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (UniqueConstraint("tail_number", "callsign", name="uq_discovered_tail_callsign"),)
