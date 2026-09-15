@@ -119,9 +119,11 @@ def _render_pdf(
     buffer = BytesIO()
     # topMargin widened to leave room for the running per-page header drawn below --
     # a plain Paragraph in `story` only renders once (page 1), so on a multi-page
-    # log the mission number would disappear after the first page. Per Gerry: "the
-    # entry can be a single line under the header on the top of each page."
-    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=1.0 * inch, bottomMargin=0.6 * inch)
+    # log this would disappear after the first page. Per Gerry: "the entry can be
+    # a single line under the header on the top of each page," then "Mission Number
+    # and Operating Period can be at the top of each sheet" -- both the mission
+    # line and the period/generated line are now drawn per-page, not just page 1.
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=1.15 * inch, bottomMargin=0.6 * inch)
     styles = getSampleStyleSheet()
     # More than one mission number showing up in the same report is a real,
     # expected case (the report is an arbitrary time range, not a single mission --
@@ -133,6 +135,10 @@ def _render_pdf(
         mission_line = f"Missions: {', '.join(mission_numbers)}"
     else:
         mission_line = "Mission #: none recorded"
+    period_line = (
+        f"Period: {start:%Y-%m-%d %H:%M}Z - {end:%Y-%m-%d %H:%M}Z    "
+        f"Generated: {datetime.now(timezone.utc):%Y-%m-%d %H:%M}Z"
+    )
 
     def draw_running_header(canvas, doc):
         canvas.saveState()
@@ -142,47 +148,58 @@ def _render_pdf(
         canvas.setFont("Helvetica", 10)
         canvas.drawString(0.6 * inch, letter[1] - 0.7 * inch, mission_line)
         canvas.drawRightString(page_width - 0.6 * inch, letter[1] - 0.7 * inch, f"Page {canvas.getPageNumber()}")
+        canvas.setFont("Helvetica", 9)
+        canvas.drawString(0.6 * inch, letter[1] - 0.87 * inch, period_line)
         canvas.restoreState()
 
-    story = [
-        Paragraph(
-            f"Period: {start:%Y-%m-%d %H:%M}Z &ndash; {end:%Y-%m-%d %H:%M}Z "
-            f"&nbsp;&nbsp; Generated: {datetime.now(timezone.utc):%Y-%m-%d %H:%M}Z",
-            styles["Normal"],
-        ),
-        Spacer(1, 0.2 * inch),
-    ]
+    story = []
 
     if not groups:
         story.append(Paragraph("No entries received in this period.", styles["Normal"]))
-
-    for received, entries in groups:
-        story.append(Paragraph(f"<b>{received:%Y-%m-%d %H:%M}Z received</b>", styles["Heading4"]))
-        table_data = [["Aircraft", "Sortie #", "Entry", "Effective Time", "Comments"]]
-        for e in entries:
-            table_data.append(
-                [
-                    e["aircraft"],
-                    str(e["sortie_number"]) if e["sortie_number"] is not None else "--",
-                    e["event_type"],
-                    f"{e['effective_time']:%H:%M}Z",
-                    e["comments"] or "",
-                ]
-            )
-        table = Table(table_data, colWidths=[1.0 * inch, 0.7 * inch, 1.2 * inch, 0.9 * inch, 2.7 * inch])
+    else:
+        # One continuous table for the whole report (2026-09-15, replacing a
+        # separate Heading4 + its own table-with-header per received-minute
+        # group) -- per Gerry: "these don't have to have all the separation...
+        # the current format with the heading row for each one is overkill."
+        # Date-Time Group is still only printed on the first row of a group,
+        # not every row, preserving the original paper-comms-log convention
+        # ("allowing several entered at once to be noted within the same
+        # timestamp") without the heavyweight per-group table/heading pair.
+        # `repeatRows=1` is reportlab's own mechanism for repeating the single
+        # header row on every page this table spans (needed now that it's one
+        # long table instead of many short ones).
+        table_data = [["Date-Time Group", "Callsign", "Sortie #", "Entry", "Effective Time", "Comments"]]
+        for received, entries in groups:
+            for i, e in enumerate(entries):
+                table_data.append(
+                    [
+                        f"{received:%Y-%m-%d %H:%M}Z" if i == 0 else "",
+                        e["aircraft"],
+                        str(e["sortie_number"]) if e["sortie_number"] is not None else "--",
+                        e["event_type"],
+                        f"{e['effective_time']:%H:%M}Z",
+                        e["comments"] or "",
+                    ]
+                )
+        table = Table(
+            table_data,
+            colWidths=[1.1 * inch, 0.9 * inch, 0.6 * inch, 1.0 * inch, 0.8 * inch, 2.1 * inch],
+            repeatRows=1,
+        )
         table.setStyle(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2b6cb0")),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONTSIZE", (0, 0), (-1, -1), 9),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.grey),  # thin per-row line, not a full grid
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
                 ]
             )
         )
         story.append(table)
-        story.append(Spacer(1, 0.15 * inch))
 
     doc.build(story, onFirstPage=draw_running_header, onLaterPages=draw_running_header)
     return buffer.getvalue()

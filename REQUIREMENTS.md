@@ -427,6 +427,23 @@ is reusable as the Phase 2 server's schema — not thrown away.
     `onFirstPage` and `onLaterPages` in `doc.build()` — reportlab's actual
     per-page mechanism, verified against a synthetic 7-page log (60 grouped
     entries) that the header and page number repeat correctly on every page.
+    **Layout compacted 2026-09-15** per Gerry: "each entry has a lot of extra
+    info... these don't have to have all the separation... the current format
+    with the heading row for each one is overkill." The per-received-minute
+    Heading4 + its own small table-with-header-row (one pair per group) became
+    a single continuous table for the whole report — one column header row
+    (Date-Time Group/Callsign/Sortie #/Entry/Effective Time/Comments), one line
+    per entry, a thin rule between rows instead of a full grid. The
+    date-time-group convention (only print it on a group's first row, not
+    every row — "allowing several entered at once to be noted within the same
+    timestamp") is preserved within the single table rather than dropped.
+    Uses reportlab's `Table(..., repeatRows=1)` so the one header row still
+    repeats on every page, same idea as the running page header above —
+    verified together against a synthetic 2-page log. Same day, Gerry: "Mission
+    Number and Operating Period can be at the top of each sheet" — the Period/
+    Generated line moved out of `story` (page-1-only) into the same
+    `draw_running_header()` callback as the mission line, so both now repeat
+    on every page rather than just the first.
   - **Mission-specific roster upload — shipped 2026-09-13**: `POST
     /api/aircraft/roster` (small upload widget in the Aircraft Aloft panel) —
     same CSV shape/upsert logic as `scripts/import_callsign_tails.py`
