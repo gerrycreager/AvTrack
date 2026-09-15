@@ -168,7 +168,7 @@ def _render_pdf(
         # `repeatRows=1` is reportlab's own mechanism for repeating the single
         # header row on every page this table spans (needed now that it's one
         # long table instead of many short ones).
-        table_data = [["Date-Time Group", "Callsign", "Sortie #", "Entry", "Effective Time", "Comments"]]
+        table_data = [["Date-Time Group", "Callsign", "Sortie #", "Entry", "Eff. Time", "Comments"]]
         for received, entries in groups:
             for i, e in enumerate(entries):
                 table_data.append(
@@ -181,9 +181,17 @@ def _render_pdf(
                         e["comments"] or "",
                     ]
                 )
+        # Widths tuned 2026-09-15 after an actual rendered page showed "Effective
+        # Time" and "Comments" running together with no visible gap between the
+        # header labels -- 0.8in wasn't enough for that header text at 9pt bold,
+        # which read (per Gerry) like the 24hr time column itself had gone
+        # missing/garbled rather than just a tight column. Widened, shortened the
+        # header label, and added thin vertical rules so column boundaries are
+        # unambiguous even when a cell (e.g. Comments, empty on most entries) has
+        # no visible content to anchor against.
         table = Table(
             table_data,
-            colWidths=[1.1 * inch, 0.9 * inch, 0.6 * inch, 1.0 * inch, 0.8 * inch, 2.1 * inch],
+            colWidths=[1.15 * inch, 0.75 * inch, 0.55 * inch, 1.05 * inch, 0.85 * inch, 2.1 * inch],
             repeatRows=1,
         )
         table.setStyle(
@@ -193,7 +201,10 @@ def _render_pdf(
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONTSIZE", (0, 0), (-1, -1), 9),
                     ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.grey),  # thin per-row line, not a full grid
+                    ("LINEAFTER", (0, 0), (-2, -1), 0.5, colors.lightgrey),  # thin column separators
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
                     ("TOPPADDING", (0, 0), (-1, -1), 3),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
                 ]
