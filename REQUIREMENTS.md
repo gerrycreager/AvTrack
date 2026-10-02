@@ -567,6 +567,141 @@ is reusable as the Phase 2 server's schema — not thrown away.
       coverage-gap point Gerry raised independently, and the same failure mode
       already documented above for FlightAware's `landed` flag).
 
+### 3.3a AOBD/OSC Support Element (AvTrack + WxCOP integration, added 2026-10-01)
+
+Per Gerry: "a way to integrate a subset of WxCOP and AvTrack into a support
+element for an Air Operations Branch Director [AOBD] and Ops Section Chief
+[OSC]." Phase 1 scoped to AOBD specifically (his own priority call); OSC is a
+deliberate later phase. Grounded in actual CAP documentation, not generic NIMS
+taskbook assumptions, per Gerry's explicit correction: "CAP AOBD doesn't yet
+follow the NIMS taskbook."
+
+- **Research sources**: `/home/gerry/CAP/Training/AOBD/AOBD_course.pdf` (CAWG,
+  2002 — richest local doc on actual AOBD workflow, not a national taskbook but
+  the best grounding available), `CAPR 60-3(I)` (`R060_003_075A4369FBA8E.pdf`,
+  marked stale/superseded locally — §1-16d: AOBD "is responsible for ensuring
+  the safety of all air operations"), `CAPF 104` (Mission Flight Plan/Briefing
+  Form — briefer must be AOBD-trainee-or-higher, requires a qualified FRO).
+  Also researched: required comms calls per **CAPR 100-3** §3.3.2 (Ops Normal
+  checks — interval is NCS/CUL-set *locally*, not a fixed CAP-wide number —
+  this directly validates the per-sortie `overdue_threshold_minutes` design
+  below over a hardcoded constant) and §3.3.1 (roll call), **CAPR 70-1**
+  Attachment 2 (Alternate Flight Following check-in schedule, substitutes for
+  a filed FAA flight plan when an IC has tracking/comms mechanisms in place;
+  also confirms CAPR 70-1's own Sortie definition matches AvTrack's existing
+  sortie-boundary logic exactly), and **CAPR 100-1**/100-3 §1.11 (station/
+  message log requirement — AvTrack's existing comms-log PDF already serves
+  this function, confirmed by regulation text, not assumed). No distinct named
+  "departure/wheels-up/landing" call is mandated by either regulation beyond
+  what AvTrack's existing EventTypes already cover.
+
+- **Air Ops Status Board — shipped 2026-10-01**: a new live, auto-refreshing
+  (`GET /api/ops-board?hours=24`, 20s poll) multi-aircraft board, digitizing
+  the CAWG course's own wall board (Sortie #/Tail #/AC Type/Mission #/PIC/
+  Assigned Area/ATD/ETA/ATA/Last Ops Normal/status), opened via a new "Ops
+  Board" toolbar button, docked as a wide bottom panel (unlike the narrow
+  per-aircraft sortie-panel rail, since this is a multi-aircraft glance view).
+  Row click opens the existing `openSortiePanel()` rather than duplicating
+  edit UI — the board is triage, not where corrections happen.
+  - **`Sortie` gained 4 nullable columns** (migration `0f7705ba70e4`):
+    `ete_hours` (single float, matching the CAWG course's own ".1 = 6 min"
+    convention literally, per Gerry's explicit choice over this app's usual
+    hours+minutes split-field pattern), `eta_override_utc`, `assigned_area`,
+    `overdue_threshold_minutes`. **No stored ETA or "last ops normal"
+    field** — both are computed server-side (`_compute_eta_utc` in
+    `app/api/sorties.py`, shared with `ops_board.py`): ETA = ATD (existing
+    `engine_start_event`) + ETE, exactly the CAWG course's own worked example
+    (ATD 10:20 + ETE 3.2hr → ETA 13:32), verified live to the second against
+    real backdated test data. Last Ops Normal = latest of every
+    `TrackingEvent` already attributed to the sortie (confirmed `sortie.events`
+    already includes engine_start/stop, takeoff/landing, touch_and_go, in/out
+    grid, ops_check — every event type gets `sortie_id` set when a sortie is
+    open) and the aircraft's latest live `Position`, whichever is newer —
+    consistent with this project's established derive-don't-duplicate
+    convention rather than another place state can drift.
+  - **Overdue trigger**: >N minutes past ETA, still open (no `ata_utc`),
+    where N is `Sortie.overdue_threshold_minutes` or
+    `Settings.default_overdue_threshold_minutes` (10, the CAWG course's
+    default) — confirmed CAP-wide via CAPR 100-3 that this interval is
+    genuinely locally-set, not a fixed national number, so the per-sortie
+    override isn't speculative design, it's regulation-grounded.
+  - **State naming**: reuses the sidebar's existing `airborne`/`ground`/
+    `"not-reporting"` convention exactly (plus `complete`) rather than
+    inventing a second naming scheme for the same concept — caught and fixed
+    during live verification (first draft used `on_ground`/`not_reporting`,
+    which silently broke the `status-${state}` CSS class lookup).
+  - **Verified live, not just code-reviewed**: ETA arithmetic exact to the
+    second against a real backdated sortie; `overdue`/`overdue_minutes`
+    correct and responsive to a live `overdue_threshold_minutes` PATCH;
+    `state` transitions correctly to `complete` on stop and drops out of
+    overdue; Playwright-confirmed the 20s poll fires on schedule (exactly 1
+    extra fetch over a 21s window) and stops cleanly when the panel closes
+    (0 fetches over 21s post-close).
+
+- **WxCOP integration — researched live, not yet built**: WxCOP (`/var/www/
+  cap_winds_app` on r815, Flask) has a real, callable JSON API, confirmed by
+  actually calling it from cosp1 (not assumed from reading source). Key
+  findings:
+  - **It's CAPR 70-1 / CAPF 70-1A, not "CAPR 70-10."** Gerry raised 70-10
+    three times with increasing confidence; checked directly against the
+    *live* `weather_impacts_api.py` on r815 each time (most recently modified
+    Sep 5, after Gerry's "recently updated" claim) — its own docstring
+    consistently reads "CAPR 70-1 Weather Impacts stoplight data." No CAPR
+    70-10 exists in any local CAP regulation file either. Proceeding on
+    CAPR 70-1 per Gerry's own fallback instruction.
+  - **Relevant blueprints** (confirmed via `app.py`'s `register_blueprint`
+    calls): `weather_impacts_api` (the CAPR 70-1 stoplight, `GET /airports`
+    takes `bounds`/`hour`/`op`/`min_rwy` — bbox order matches AvTrack's own
+    `/api/airfields?bounds=` convention), `weather_api` (METAR including
+    `flight_category`, mounted `/api/weather`), `weather_enhanced_api` (NDA +
+    stadium TFRs only — **general FAA TFRs have no WxCOP endpoint at all**,
+    confirmed by grepping every blueprint for `tfr`), `airmet_sigmet_api`
+    (confirmed live and working). None of the data-serving blueprints require
+    the app-level `auth.py` login (only admin tooling does).
+  - **Live connection recipe, confirmed working**: `http://192.168.0.200`
+    (r815's LAN IP) with an explicit `Host: wxcop.duckdns.org` header —
+    required because Apache does name-based vhost dispatch and r815's TLS
+    cert isn't valid for the bare LAN IP, so this sidesteps needing TLS for
+    an internal LAN call entirely.
+  - **Live infrastructure finding, flagged to Gerry separately from AvTrack
+    work**: every DB-backed WxCOP endpoint tested 2026-10-01 returned 500 —
+    r815 cannot reach data2 (WxCOP's own Postgres host) at all ("No route to
+    host," port 5432). Pre-existing WxCOP-side outage, unrelated to anything
+    in this repo.
+  - **iframe embedding is blocked by design**: `X-Frame-Options SAMEORIGIN`
+    set on every response in `cap_winds.conf`, confirmed live. Rules out
+    "just embed the WxCOP page" for anything — on-demand products (METAR
+    text/TAF/AIRMET-SIGMET/general radar) become new-tab links instead,
+    per Gerry's own direction for EWMC as "a second window."
+  - **EWMC already has "Station Plots"** (very recent — dated 2026-09-22 in
+    its own code comments): colored by `flight_category` (VFR `#00b300` /
+    MVFR `#0099ff` / IFR `#cc0000` / LIFR `#ff00ff`), zoom-tiered, sourced
+    from `weather_api`'s METAR endpoints. This changes the original plan —
+    Gerry: "the 'dots' are now, in EWMC, a station plot with color
+    representing Flight Category... We need another way to code CAPR 70-1
+    constraints" — i.e. Flight Category (observed conditions) and Flight
+    Impacts (forecast-based Go/Caution/No-Go) are two distinct things Gerry
+    wants both shown, and since EWMC's station-plot pattern is earmarked for
+    Flight Category, Flight Impacts needs a *different* visual encoding on
+    AvTrack's airfield layer — **not yet designed, open item below**.
+
+- **Explicitly not yet built** (scoped, not forgotten):
+  - Weather overlay on the map itself (Flight Category station plots +
+    whatever new encoding represents Flight Impacts — visual design still
+    open) and the WxCOP HTTP client (`app/integrations/wxcop_client.py`,
+    planned, not yet written).
+  - User-selectable airfield pinning/highlighting, independent of the
+    existing zoom-tier auto-reveal — per Gerry: "if the auto-expose as we
+    zoom in isn't sufficient, the AOBD or OSC signed on to use this should be
+    able to identify specific airfields they will want highlighted." Revives
+    the previously-deferred AO/AOI "pinned for labeling" idea with a concrete
+    use case.
+  - EWMC-as-second-window button, and on-demand new-tab links for METAR/TAF/
+    AIRMET-SIGMET/radar.
+  - OSC board / ICS-220 generation — separate future phase.
+  - True proximity/deconfliction (5nm/2000ft cylinder test) — unrelated
+    pre-existing deferred idea, not folded into this work.
+
 ### 3.4 Weather
 - MRMS composite reflectivity and velocity overlay.
 - GLM (GOES-R Geostationary Lightning Mapper) strike data overlay.

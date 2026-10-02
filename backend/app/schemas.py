@@ -125,6 +125,11 @@ class SortieCreateIn(BaseModel):
     pic_name: str | None = None
     engine_start_utc: datetime | None = None  # defaults to server-now, same as EventCreateIn
     logged_by: str = "unknown"
+    # Air Ops Status Board fields (REQUIREMENTS.md 3.3) -- all optional, a sortie
+    # started without an ETE simply can't be overdue-flagged on the board.
+    ete_hours: float | None = None
+    assigned_area: str | None = None
+    overdue_threshold_minutes: int | None = None
 
 
 class SortieStopIn(BaseModel):
@@ -139,6 +144,10 @@ class SortiePatchIn(BaseModel):
     sortie_number: int | None = None
     mission_number: str | None = None
     pic_name: str | None = None
+    ete_hours: float | None = None
+    assigned_area: str | None = None
+    overdue_threshold_minutes: int | None = None
+    eta_override_utc: datetime | None = None
 
 
 class WaypointCreateIn(BaseModel):
@@ -182,3 +191,37 @@ class SortieOut(BaseModel):
     landing_utc: datetime | None
     waypoints: list[WaypointOut]
     events: list[EventOut]
+    # Air Ops Status Board fields (REQUIREMENTS.md 3.3). eta_utc is computed
+    # server-side (ATD + ETE, or the AOBD override) so the frontend never re-derives
+    # the arithmetic itself -- see app/api/sorties.py's _to_sortie_out.
+    ete_hours: float | None
+    eta_override_utc: datetime | None
+    eta_utc: datetime | None
+    overdue_threshold_minutes: int | None
+    assigned_area: str | None
+
+
+class OpsBoardRow(BaseModel):
+    """One row of the Air Ops Status Board -- see app/api/ops_board.py."""
+
+    sortie_id: UUID
+    tail_number: str
+    callsign: str | None
+    aircraft_type: str | None
+    sortie_number: int | None
+    mission_number: str | None
+    pic_name: str | None
+    assigned_area: str | None
+    atd_utc: datetime | None
+    ete_hours: float | None
+    eta_utc: datetime | None
+    ata_utc: datetime | None
+    last_ops_normal_utc: datetime | None
+    overdue: bool
+    overdue_minutes: int | None
+    state: str  # airborne / on_ground / not_reporting / complete
+
+
+class OpsBoardOut(BaseModel):
+    generated_at: datetime
+    rows: list[OpsBoardRow]

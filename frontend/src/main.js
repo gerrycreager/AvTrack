@@ -715,6 +715,8 @@ function renderStartSortieForm(tailNumber) {
     <div class="sortie-field"><label>Sortie #</label><input type="number" id="new-sortie-number" /></div>
     <div class="sortie-field"><label>Mission #</label><input type="text" id="new-mission-number" placeholder="YY-X-NNNN" value="${savedMissionNumber}" /></div>
     <div class="sortie-field"><label>PIC</label><input type="text" id="new-pic-name" value="${defaultPic}" /></div>
+    <div class="sortie-field"><label>Assigned Area</label><input type="text" id="new-assigned-area" placeholder="Grid 12 / Route A" /></div>
+    <div class="sortie-field"><label>ETE (hrs)</label><input type="number" step="0.1" min="0" id="new-ete-hours" placeholder="e.g. 3.2" /></div>
     ${timeEntryFieldHtml("new-engine-start", "Eng Start")}
     <button class="sortie-action-btn" id="start-sortie-btn">Start Sortie</button>
   `;
@@ -725,6 +727,8 @@ function renderStartSortieForm(tailNumber) {
     const sortieNumber = document.getElementById("new-sortie-number").value;
     const missionNumber = document.getElementById("new-mission-number").value.trim();
     const picName = document.getElementById("new-pic-name").value.trim();
+    const assignedArea = document.getElementById("new-assigned-area").value.trim();
+    const eteHours = document.getElementById("new-ete-hours").value;
     if (missionNumber) localStorage.setItem(MISSION_NUMBER_KEY, missionNumber);
     await fetch(`/api/aircraft/${tailNumber}/sorties`, {
       method: "POST",
@@ -733,6 +737,8 @@ function renderStartSortieForm(tailNumber) {
         sortie_number: sortieNumber ? parseInt(sortieNumber, 10) : null,
         mission_number: missionNumber || null,
         pic_name: picName || null,
+        assigned_area: assignedArea || null,
+        ete_hours: eteHours ? parseFloat(eteHours) : null,
         engine_start_utc: readTimeEntryField("new-engine-start"),
         logged_by: "gerry",
       }),
@@ -834,6 +840,7 @@ function renderInProgressSortie(tailNumber, sortie) {
     <h3>Sortie In Progress</h3>
     <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>Eng Start: ${fmtInTz(sortie.engine_start_utc)}</span></div>
     <div class="sortie-summary-row"><span>PIC: ${sortie.pic_name ?? "—"}</span><span>Mission: ${sortie.mission_number ?? "—"}</span></div>
+    <div class="sortie-summary-row"><span>Area: ${sortie.assigned_area ?? "—"}</span><span>ETA: ${sortie.eta_utc ? fmtInTz(sortie.eta_utc) : "—"}</span></div>
     <div class="sortie-summary-row"><span>Takeoff: ${sortie.takeoff_utc ? fmtInTz(sortie.takeoff_utc) : "—"}</span><span>Landing: ${sortie.landing_utc ? fmtInTz(sortie.landing_utc) : "—"}</span></div>
     ${timeEntryFieldHtml("stop-engine", "Eng Stop")}
     <button class="sortie-action-btn stop" id="stop-sortie-btn">Stop Sortie</button>
@@ -1022,6 +1029,105 @@ async function logEvent(tailNumber, eventType, eventTimeUtc = null) {
 document.getElementById("sortie-close").addEventListener("click", () => {
   document.getElementById("sortie-panel").hidden = true;
   currentSortieTail = null;
+});
+
+// ── Air Ops Status Board (REQUIREMENTS.md 3.3, added 2026-10-01) -- a live,
+// multi-aircraft digitization of the AOBD's wall board, grounded in the CAWG AOBD
+// course: Sortie #/Tail/AC Type/Assigned Area/ATD/ETA/ATA/Last Ops Normal, with
+// overdue flagging. Polling refresh (not a new WS channel) since this data doesn't
+// change at ADS-B frequency -- matches the project's existing precedent for
+// lower-frequency data (e.g. airfields bbox refetch).
+const OPS_BOARD_REFRESH_MS = 20000;
+let opsBoardInterval = null;
+
+const OPS_BOARD_STATE_LABEL = {
+  airborne: "AIRBORNE",
+  ground: "ON GROUND",
+  "not-reporting": "NOT REPORTING",
+  complete: "COMPLETE",
+};
+
+async function refreshOpsBoard() {
+  try {
+    const res = await fetch("/api/ops-board?hours=24");
+    const { rows, generated_at } = await res.json();
+    renderOpsBoardTable(rows);
+    document.getElementById("ops-board-updated").textContent = `Updated ${fmtInTz(generated_at)}`;
+  } catch (err) {
+    document.getElementById("ops-board-table").innerHTML = "<em>Failed to load ops board.</em>";
+    console.error(err);
+  }
+}
+
+function renderOpsBoardTable(rows) {
+  const container = document.getElementById("ops-board-table");
+  if (rows.length === 0) {
+    container.innerHTML = "<em>No sorties in the last 24 hours.</em>";
+    return;
+  }
+  // Overdue first (most-overdue-first), then airborne, then ground, then
+  // not-reporting, then complete -- same priority-sort idea as the sidebar's
+  // STATE_RANK, but overdue always wins regardless of state since that's the one
+  // thing an AOBD glancing at the board needs to see first.
+  const stateRank = { airborne: 0, ground: 1, "not-reporting": 2, complete: 3 };
+  const sorted = [...rows].sort((a, b) => {
+    if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
+    if (a.overdue && b.overdue) return b.overdue_minutes - a.overdue_minutes;
+    return stateRank[a.state] - stateRank[b.state];
+  });
+
+  const headers = [
+    "Sortie #",
+    "Aircraft",
+    "Type",
+    "Mission #",
+    "PIC",
+    "Assigned Area",
+    "ATD",
+    "ETA",
+    "ATA",
+    "Last Ops Normal",
+    "Status",
+  ];
+  const headerHtml = headers.map((h) => `<th>${h}</th>`).join("");
+  const bodyHtml = sorted
+    .map((r) => {
+      const overdueFlag = r.overdue ? `<span class="overdue-flag">OVERDUE +${r.overdue_minutes}m</span>` : "";
+      return `
+        <tr class="${r.overdue ? "overdue" : ""}" data-tail="${r.tail_number}">
+          <td>${r.sortie_number ?? "—"}</td>
+          <td>${r.callsign ?? r.tail_number}</td>
+          <td>${r.aircraft_type ?? "—"}</td>
+          <td>${r.mission_number ?? "—"}</td>
+          <td>${r.pic_name ?? "—"}</td>
+          <td>${r.assigned_area ?? "—"}</td>
+          <td>${r.atd_utc ? fmtInTz(r.atd_utc) : "—"}</td>
+          <td>${r.eta_utc ? fmtInTz(r.eta_utc) : "—"} ${overdueFlag}</td>
+          <td>${r.ata_utc ? fmtInTz(r.ata_utc) : "—"}</td>
+          <td>${r.last_ops_normal_utc ? fmtInTz(r.last_ops_normal_utc) : "—"}</td>
+          <td><span class="status-badge status-${r.state}">${OPS_BOARD_STATE_LABEL[r.state]}</span></td>
+        </tr>`;
+    })
+    .join("");
+
+  container.innerHTML = `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
+  // Row click opens the existing per-aircraft sortie panel -- the board is a
+  // glance/triage view, the sortie panel is still where an AOBD actually logs or
+  // corrects something, not duplicated here.
+  container.querySelectorAll("tbody tr").forEach((row) => {
+    row.addEventListener("click", () => openSortiePanel(row.dataset.tail));
+  });
+}
+
+document.getElementById("ops-board-toggle").addEventListener("click", () => {
+  document.getElementById("ops-board-panel").hidden = false;
+  refreshOpsBoard();
+  if (!opsBoardInterval) opsBoardInterval = setInterval(refreshOpsBoard, OPS_BOARD_REFRESH_MS);
+});
+document.getElementById("ops-board-close").addEventListener("click", () => {
+  document.getElementById("ops-board-panel").hidden = true;
+  clearInterval(opsBoardInterval);
+  opsBoardInterval = null;
 });
 
 // MGRS precision-box outline (REQUIREMENTS.md 3.2, added 2026-09-13) -- when a

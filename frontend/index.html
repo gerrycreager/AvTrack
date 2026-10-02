@@ -34,6 +34,7 @@
     .status-badge.status-airborne { background: #1f6b3a; color: #d6f5e0; }
     .status-badge.status-ground { background: #3a4048; color: #cdd3d8; }
     .status-badge.status-not-reporting { background: transparent; color: #6b7580; border: 1px solid #3a4048; }
+    .status-badge.status-complete { background: #1a3a5c; color: #bcdcff; }
     #locate-bar { position: absolute; top: 10px; left: 10px; z-index: 1; display: flex; gap: 6px; }
     #locate-bar input { padding: 6px 8px; border-radius: 4px; border: 1px solid #888; }
     #locate-bar input#locate-input { width: 220px; }
@@ -97,6 +98,30 @@
     .gis-layer-row { display: flex; align-items: center; justify-content: space-between; padding: 3px 0; }
     .gis-layer-row .gis-layer-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .gis-layer-row button { background: none; border: none; color: #d9534f; cursor: pointer; font-size: 13px; padding: 0 4px; }
+
+    /* Ops Board panel -- wide/table-oriented, unlike the narrow sortie-panel rail,
+       since this shows many aircraft at once rather than one aircraft's detail. */
+    #ops-board-panel {
+      position: absolute; bottom: 0; left: 0; right: 0; max-height: 50%;
+      background: rgba(20, 24, 28, 0.97); color: #e8eaed; overflow-y: auto;
+      box-sizing: border-box; padding: 14px; z-index: 3; border-top: 1px solid #3a4048;
+      box-shadow: 0 -2px 12px rgba(0,0,0,0.5);
+    }
+    #ops-board-panel[hidden] { display: none; }
+    #ops-board-panel h2 { margin: 0 0 2px; font-size: 16px; }
+    #ops-board-panel .sub { color: #9aa4ad; font-size: 12px; margin-bottom: 10px; }
+    #ops-board-panel .close-btn {
+      position: absolute; top: 10px; right: 10px; background: none; border: none;
+      color: #9aa4ad; font-size: 16px; cursor: pointer;
+    }
+    #ops-board-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    #ops-board-table th { text-align: left; color: #9aa4ad; font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.04em; padding: 4px 8px; border-bottom: 1px solid #3a4048; }
+    #ops-board-table td { padding: 5px 8px; border-bottom: 1px solid #262b31; cursor: pointer; }
+    #ops-board-table tr:hover td { background: #262b31; }
+    #ops-board-table tr.overdue td { background: #4a1a1a; }
+    #ops-board-table tr.overdue:hover td { background: #5a2222; }
+    #ops-board-table .overdue-flag { color: #ff6b6b; font-weight: 700; }
 
     /* Sortie panel */
     #sortie-panel {
@@ -174,6 +199,8 @@
     <button id="locate-btn">Go</button>
     <span style="color:#666; align-self:center; font-size:14px; margin-left:6px;">|</span>
     <input id="jump-input" placeholder="Callsign or tail — Enter" title="Jump straight to an aircraft's sortie panel, even before it has a live position" style="width:150px;" />
+    <span style="color:#666; align-self:center; font-size:14px; margin-left:6px;">|</span>
+    <button id="ops-board-toggle" title="Air Ops Status Board (AOBD)">Ops Board</button>
   </div>
   <div id="basemap-switcher">
     <select id="basemap-select">
@@ -258,6 +285,13 @@
       <div class="log-buttons" id="sortie-log-buttons"></div>
       <div id="sortie-events"><em>Loading…</em></div>
     </details>
+  </div>
+
+  <div id="ops-board-panel" hidden>
+    <button class="close-btn" id="ops-board-close">✕</button>
+    <h2>Air Ops Status Board</h2>
+    <div class="sub" id="ops-board-updated"></div>
+    <div id="ops-board-table"><em>Loading…</em></div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>

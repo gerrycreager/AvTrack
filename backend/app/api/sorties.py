@@ -10,7 +10,7 @@ metadata (PIC, sortie/mission number) is plain and mutable via PATCH -- not
 safety-critical the way a timestamp is.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import mgrs
 from fastapi import APIRouter, Depends, HTTPException
@@ -44,18 +44,36 @@ def _to_waypoint_out(wp: SortieWaypoint) -> WaypointOut:
     )
 
 
+def _compute_eta_utc(sortie: Sortie, engine_start_utc: datetime | None) -> datetime | None:
+    """ATD + ETE, per the CAWG AOBD course's own worked example (ATD 10:20 + ETE
+    3.2hr -> ETA 13:32) -- an AOBD never types an ETA in directly. An explicit
+    `eta_override_utc` (a crew calling in an extension) always wins when set.
+    Shared with app/api/ops_board.py, which needs the identical arithmetic."""
+    if sortie.eta_override_utc is not None:
+        return sortie.eta_override_utc
+    if engine_start_utc is not None and sortie.ete_hours is not None:
+        return engine_start_utc + timedelta(hours=sortie.ete_hours)
+    return None
+
+
 def _to_sortie_out(sortie: Sortie) -> SortieOut:
+    engine_start_utc = _effective_time(sortie.engine_start_event) if sortie.engine_start_event else None
     return SortieOut(
         id=sortie.id,
         sortie_number=sortie.sortie_number,
         mission_number=sortie.mission_number,
         pic_name=sortie.pic_name,
-        engine_start_utc=_effective_time(sortie.engine_start_event) if sortie.engine_start_event else None,
+        engine_start_utc=engine_start_utc,
         engine_stop_utc=_effective_time(sortie.engine_stop_event) if sortie.engine_stop_event else None,
         takeoff_utc=_effective_time(sortie.takeoff_event) if sortie.takeoff_event else None,
         landing_utc=_effective_time(sortie.landing_event) if sortie.landing_event else None,
         waypoints=[_to_waypoint_out(w) for w in sortie.waypoints],
         events=[_to_event_out(e) for e in sortie.events],
+        ete_hours=sortie.ete_hours,
+        eta_override_utc=sortie.eta_override_utc,
+        eta_utc=_compute_eta_utc(sortie, engine_start_utc),
+        overdue_threshold_minutes=sortie.overdue_threshold_minutes,
+        assigned_area=sortie.assigned_area,
     )
 
 
@@ -117,6 +135,9 @@ async def create_sortie(tail_number: str, body: SortieCreateIn, session: AsyncSe
         mission_number=body.mission_number,
         pic_name=body.pic_name,
         engine_start_event_id=start_event.id,
+        ete_hours=body.ete_hours,
+        assigned_area=body.assigned_area,
+        overdue_threshold_minutes=body.overdue_threshold_minutes,
     )
     session.add(sortie)
     await session.flush()  # need sortie.id before linking start_event back to it
@@ -180,6 +201,14 @@ async def patch_sortie(sortie_id: str, body: SortiePatchIn, session: AsyncSessio
         sortie.mission_number = body.mission_number
     if body.pic_name is not None:
         sortie.pic_name = body.pic_name
+    if body.ete_hours is not None:
+        sortie.ete_hours = body.ete_hours
+    if body.assigned_area is not None:
+        sortie.assigned_area = body.assigned_area
+    if body.overdue_threshold_minutes is not None:
+        sortie.overdue_threshold_minutes = body.overdue_threshold_minutes
+    if body.eta_override_utc is not None:
+        sortie.eta_override_utc = body.eta_override_utc
     await session.commit()
     sortie = await _reload_sortie(sortie.id, session)
     return _to_sortie_out(sortie)

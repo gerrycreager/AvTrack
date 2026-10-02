@@ -267,6 +267,29 @@ class Sortie(Base):
     landing_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # Air Ops Status Board support (REQUIREMENTS.md 3.3/AOBD board, added 2026-10-01).
+    # Grounded in the CAWG AOBD course's own worked example (ATD 10:20 + ETE 3.2hr ->
+    # ETA 13:32): ETA is never typed in directly by an AOBD, it's computed as
+    # ATD (engine_start_event) + ETE, so there's no stored "eta" field here, just the
+    # ETE an aircrew reports at brief time. Single float hours (not an hours+minutes
+    # pair like Ops Check fuel remaining) per Gerry's explicit choice, matching the
+    # course's own ".1 = 6 minutes" convention literally rather than this app's usual
+    # split-field pattern.
+    ete_hours: Mapped[float | None] = mapped_column(Float)
+    # AOBD override for the computed ETA (course's overdue-escalation step: "crew
+    # called in and extended their ETA") -- takes precedence over
+    # engine_start + ete_hours when set.
+    eta_override_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Per-sortie override of the >10min-late overdue trigger -- the course's printed
+    # board has "OPS NORMAL REQ'D EVERY ___" as a user-fillable blank, not a fixed
+    # number. Null means use Settings.default_overdue_threshold_minutes (10).
+    overdue_threshold_minutes: Mapped[int | None] = mapped_column()
+    # Status-board "Assigned Area" column (course: what grid/route the crew is
+    # working, written as a grid # or route name, not a geometry). Free text,
+    # mutable like mission_number/pic_name -- not audit-trailed, it's metadata, not
+    # a safety-critical timestamp.
+    assigned_area: Mapped[str | None] = mapped_column(String(100))
+
     aircraft: Mapped["Aircraft"] = relationship()
     engine_start_event: Mapped["TrackingEvent | None"] = relationship(
         foreign_keys=[engine_start_event_id], lazy="selectin"

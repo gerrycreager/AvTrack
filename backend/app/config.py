@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # defaults on independently of adsb_polling_enabled -- see app/adsb/adsb_lol.py.
     adsblol_polling_enabled: bool = True
     adsblol_poll_interval_seconds: int = 30
+    # Air Ops Status Board (REQUIREMENTS.md 3.3) overdue trigger, minutes past the
+    # computed ETA -- the CAWG AOBD course's own documented default. Per-sortie
+    # overridable via Sortie.overdue_threshold_minutes; this is only the fallback.
+    default_overdue_threshold_minutes: int = 10
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:
