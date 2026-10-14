@@ -58,6 +58,10 @@ class AirfieldOut(BaseModel):
     # docstring for why these thresholds mirror CAP WxCOP's airport_tiers_endpoint.py
     # rather than a literal CAPR 70-1 citation.
     tier: int | None
+    # Independent tiering for the Station Plot display mode (REQUIREMENTS.md 3.3a),
+    # deliberately decoupled from `tier` above so the two schemes can be tuned
+    # separately -- see compute_station_plot_tier() in app/api/airfields.py.
+    station_plot_tier: int
 
     model_config = {"from_attributes": True}
 

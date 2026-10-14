@@ -206,6 +206,7 @@ async function refreshAirfields() {
     const res = await fetch(`/api/airfields?bounds=${bounds}`);
     const rows = await res.json();
     if (requestId !== airfieldsRequestId) return; // superseded by a newer request
+    latestAirfieldRows = rows; // reused by the Flight Impacts/Station Plot weather modes below
     const geojson = airfieldsToGeoJSON(rows);
     const source = map.getSource("airfields");
     if (source) {
@@ -254,6 +255,11 @@ async function refreshAirfields() {
       });
     }
     updateAirfieldZoomFilter();
+    // Piggyback the active weather mode's refetch on this same debounced bbox
+    // refresh (REQUIREMENTS.md 3.3a) rather than running a second moveend timer --
+    // both need latestAirfieldRows to be current anyway.
+    if (airfieldDisplayMode === "impacts") fetchFlightImpactsData();
+    else if (airfieldDisplayMode === "station-plot") fetchStationPlotData();
   } catch (err) {
     console.error("Failed to load airfields", err);
   }
@@ -268,6 +274,322 @@ document.getElementById("labels-toggle").addEventListener("change", (e) => {
   labelsVisible = e.target.checked;
   updateAirfieldZoomFilter();
 });
+
+// ── Airfield weather display modes: Flight Impacts & Station Plot ──────────
+// REQUIREMENTS.md 3.3a. Mutually exclusive with the default tier-colored dots
+// above (Gerry's explicit call, 2026-10-14) -- Tier colors / Flight Impacts /
+// Station Plot are one radio-group mode, not independent stackable toggles, so
+// nothing fights over the same dot's fill color. Both weather modes depend on
+// WxCOP (host r815) via the backend's /api/weather/* proxy
+// (app/api/weather.py -> app/integrations/wxcop_client.py), which can go down
+// independently of AvTrack itself (data2, WxCOP's own DB host, had an
+// extended outage starting 2026-10-14 and is mid-restart as of the same day) --
+// both fetch functions below are written to degrade visibly, not silently or
+// as an error, whenever `available` comes back false.
+
+// Flight Impacts (CAPR 70-1, migrating to 70-10) -- WxCOP's own weather-impacts
+// API already classifies each airport GREEN/YELLOW/RED/UNKNOWN (FRO / SFRO /
+// CAP-DO-via-NOC approval authority, confirmed live against weather_impacts_api.py
+// on r815), so this just maps those labels to colors rather than re-deriving the
+// stoplight logic here.
+const FLIGHT_IMPACTS_COLORS = { GREEN: "#2e7d32", YELLOW: "#f9a825", RED: "#c62828" };
+const FLIGHT_IMPACTS_FALLBACK = "#808080"; // no WxCOP data for this airfield (most military fields included) or WxCOP unreachable
+
+// Reused as-is from WxCOP/EWMC's station plots -- per Gerry (2026-10-14), these
+// also match the USAF/ForeFlight (and likely FAA) flight-category convention, not
+// just WxCOP's own choice, so there's a second reason to keep them rather than
+// picking an AvTrack-specific palette.
+const FLIGHT_CATEGORY_COLORS = { VFR: "#00b300", MVFR: "#0099ff", IFR: "#cc0000", LIFR: "#ff00ff", unknown: "#808080" };
+
+// Deliberately independent of TIER_MIN_ZOOM above (Gerry's explicit call,
+// 2026-10-14: station plots get their own tiering, not reused from the dot
+// layer's tier field) -- keyed by station_plot_tier (app/api/airfields.py
+// compute_station_plot_tier(), mirrors EWMC's own military/hub/regional/local/
+// small classification). Thresholds start lower (more detail at a more
+// zoomed-out view) than EWMC's own values on purpose: EWMC has to cover the
+// whole CONUS/multiple regions at once, while AvTrack is typically opened
+// already scoped to one wing (state-sized) or occasionally a region (several
+// wings) -- see Gerry's FLWG Hurricane Isaias example. Starting point, not yet
+// tuned against real field use.
+const STATION_PLOT_MIN_ZOOM = { 1: 0, 2: 0, 3: 4, 4: 6, 5: 6 };
+const STATION_PLOT_FULL_ZOOM_OFFSET = 3; // full plot at minZoom+this; barb-only between minZoom and that
+
+let airfieldDisplayMode = "tier"; // "tier" | "impacts" | "station-plot"
+let latestAirfieldRows = []; // kept in sync by refreshAirfields; reused here instead of a second bbox fetch
+let latestMetarByIcao = {};
+let metarAvailable = false;
+const stationPlotMarkers = new Map(); // airfield id -> maplibregl.Marker
+let weatherPollInterval = null;
+const WEATHER_POLL_MS = 2 * 60 * 1000; // matches EWMC's own refresh cadence
+
+function currentBoundsParam() {
+  const b = map.getBounds();
+  return `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+}
+
+function clearStationPlotMarkers() {
+  for (const marker of stationPlotMarkers.values()) marker.remove();
+  stationPlotMarkers.clear();
+}
+
+async function fetchFlightImpactsData() {
+  const statusEl = document.getElementById("airfield-mode-status");
+  try {
+    const res = await fetch(`/api/weather/impacts?bounds=${currentBoundsParam()}`);
+    const data = await res.json();
+    if (!map.getLayer("airfields-layer")) return;
+    if (!data.available) {
+      map.setPaintProperty("airfields-layer", "circle-color", FLIGHT_IMPACTS_FALLBACK);
+      statusEl.textContent = "Flight Impacts unavailable (WxCOP unreachable)";
+      return;
+    }
+    // icao_id-keyed match expression -- airfields absent here (including most
+    // military fields, which WxCOP's reporting-station data mostly doesn't cover)
+    // fall through to the neutral fallback rather than a forced tier color.
+    const matchExpr = ["match", ["get", "icao_id"]];
+    let count = 0;
+    for (const a of data.airports) {
+      if (!a.station_id) continue;
+      matchExpr.push(a.station_id, FLIGHT_IMPACTS_COLORS[a.color] || FLIGHT_IMPACTS_FALLBACK);
+      count++;
+    }
+    matchExpr.push(FLIGHT_IMPACTS_FALLBACK);
+    map.setPaintProperty("airfields-layer", "circle-color", count > 0 ? matchExpr : FLIGHT_IMPACTS_FALLBACK);
+    statusEl.textContent = `Flight Impacts (${count} stations)`;
+  } catch (err) {
+    console.error("Failed to load Flight Impacts", err);
+    statusEl.textContent = "Flight Impacts unavailable";
+  }
+}
+
+// Calm (<3kt, WxCOP's own threshold) draws an open circle; otherwise a shaft with
+// pennants (50kt) / full barbs (10kt) / half barbs (5kt) built up from the speed
+// rounded to the nearest 5kt -- same construction as EWMC's windBarbSvg(), ported
+// from Leaflet divIcon HTML to a MapLibre DOM marker. Direction is applied by the
+// caller via a CSS transform:rotate() on the wrapping element, not baked into the
+// path, so this one function serves any direction.
+function windBarbSvg(speedKts, color) {
+  if (speedKts == null || speedKts < 3) {
+    return `<svg width="20" height="30" viewBox="0 0 20 30"><circle cx="10" cy="15" r="6" fill="none" stroke="${color}" stroke-width="2"/></svg>`;
+  }
+  const spd = Math.round(speedKts / 5) * 5;
+  let remaining = spd;
+  const pennants = Math.floor(remaining / 50);
+  remaining %= 50;
+  const fullBarbs = Math.floor(remaining / 10);
+  remaining %= 10;
+  const halfBarbs = Math.floor(remaining / 5);
+
+  let marks = "";
+  let pos = 2; // distance from the tip (top, feather end) down the shaft toward the station
+  for (let i = 0; i < pennants; i++) {
+    marks += `<path d="M10,${pos} L17,${pos + 5} L10,${pos + 8} Z" fill="${color}"/>`;
+    pos += 8;
+  }
+  for (let i = 0; i < fullBarbs; i++) {
+    marks += `<line x1="10" y1="${pos}" x2="17" y2="${pos + 5}" stroke="${color}" stroke-width="2"/>`;
+    pos += 5;
+  }
+  for (let i = 0; i < halfBarbs; i++) {
+    marks += `<line x1="10" y1="${pos}" x2="13.5" y2="${pos + 2.5}" stroke="${color}" stroke-width="2"/>`;
+    pos += 5;
+  }
+  return `<svg width="20" height="30" viewBox="0 0 20 30">
+    <line x1="10" y1="2" x2="10" y2="28" stroke="${color}" stroke-width="2"/>
+    ${marks}
+  </svg>`;
+}
+
+// Standard station-model sky-cover coverage circle (SKC/CLR open, FEW/SCT partial
+// fill, BKN mostly filled with a cut wedge, OVC fully filled) -- colored by flight
+// category rather than black/white, EWMC's own deliberate deviation from the
+// synoptic standard, carried over per Gerry's direction to match it. Hand-rolled
+// pie-slice approximation, not a byte-for-byte port of EWMC's exact paths (those
+// weren't extracted) -- close enough to the same visual convention.
+function skyCoverSvg(skyConditions, color) {
+  const covers = (skyConditions || []).map((c) => c.cover);
+  let cover = "SKC";
+  if (covers.includes("OVC")) cover = "OVC";
+  else if (covers.includes("BKN")) cover = "BKN";
+  else if (covers.includes("SCT")) cover = "SCT";
+  else if (covers.includes("FEW")) cover = "FEW";
+
+  if (cover === "SKC" || cover === "CLR" || covers.length === 0) {
+    return `<svg width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="none" stroke="${color}" stroke-width="2"/></svg>`;
+  }
+  if (cover === "OVC") {
+    return `<svg width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="${color}"/></svg>`;
+  }
+  if (cover === "BKN") {
+    return `<svg width="20" height="20" viewBox="0 0 20 20">
+      <circle cx="10" cy="10" r="9" fill="${color}"/>
+      <path d="M10,10 L10,1 A9,9 0 0,0 2.4,15 Z" fill="#14181c"/>
+    </svg>`;
+  }
+  if (cover === "SCT") {
+    return `<svg width="20" height="20" viewBox="0 0 20 20">
+      <circle cx="10" cy="10" r="9" fill="none" stroke="${color}" stroke-width="2"/>
+      <path d="M10,10 L10,1 A9,9 0 0,1 17.6,15 Z" fill="${color}"/>
+    </svg>`;
+  }
+  // FEW
+  return `<svg width="20" height="20" viewBox="0 0 20 20">
+    <circle cx="10" cy="10" r="9" fill="none" stroke="${color}" stroke-width="2"/>
+    <path d="M10,10 L10,1 A9,9 0 0,1 15.36,4.64 Z" fill="${color}"/>
+  </svg>`;
+}
+
+// Lowest BKN/OVC layer's height_ft -- the bulk METAR response has no precomputed
+// ceiling field, same derivation EWMC does client-side.
+function deriveCeilingFt(skyConditions) {
+  const heights = (skyConditions || [])
+    .filter((c) => c.cover === "BKN" || c.cover === "OVC")
+    .map((c) => c.height_ft)
+    .filter((h) => h != null);
+  return heights.length ? Math.min(...heights) : null;
+}
+
+function stationPlotSize(showFullPlot) {
+  return showFullPlot ? [70, 44] : [34, 34];
+}
+
+// Inner HTML only -- the wrapper element (size/positioning) is created once by
+// renderStationPlotMarkers() and mutated in place on update, same pattern as
+// upsertMarker's aircraft dot/datablock, rather than rebuilt from scratch each
+// time. Layout matches EWMC's own full-plot convention (temp upper-left, dewpoint
+// lower-left, combined wind-barb+sky-cover symbol center with the barb drawn
+// rotated on top of the sky-cover circle, ceiling upper-right, visibility
+// lower-right, gust bottom-center in a fixed hazard red regardless of flight
+// category) -- these are Gerry's own deliberate WxCOP design choices, carried
+// over faithfully rather than "corrected" to the textbook synoptic layout.
+function buildStationPlotInnerHtml(metar, showFullPlot) {
+  const color = FLIGHT_CATEGORY_COLORS[metar.flight_category] || FLIGHT_CATEGORY_COLORS.unknown;
+  const dir = metar.wind_dir ?? 0;
+  const barbLeft = showFullPlot ? 18 : 7;
+  const barb = `<div style="position:absolute; top:0; left:${barbLeft}px; transform:rotate(${dir}deg);">${windBarbSvg(metar.wind_speed_kts, color)}</div>`;
+  if (!showFullPlot) return barb;
+
+  const sky = `<div style="position:absolute; top:0; left:18px;">${skyCoverSvg(metar.sky_conditions, color)}</div>`;
+  const tempC = metar.temp_c != null ? Math.round(metar.temp_c) : "—";
+  const dewC = metar.dewpoint_c != null ? Math.round(metar.dewpoint_c) : "—";
+  const ceilFt = deriveCeilingFt(metar.sky_conditions);
+  const ceilTxt = ceilFt != null ? `C${Math.round(ceilFt / 100)}` : "";
+  const visTxt = metar.visibility_sm != null ? `${metar.visibility_sm}SM` : "";
+  const gustTxt = metar.wind_gust_kts ? `G${Math.round(metar.wind_gust_kts)}` : "";
+  return `
+    <div class="sp-field" style="position:absolute; left:0; top:8px; width:16px; text-align:right;">${tempC}</div>
+    <div class="sp-field" style="position:absolute; left:0; top:20px; width:16px; text-align:right;">${dewC}</div>
+    ${sky}
+    ${barb}
+    <div class="sp-field" style="position:absolute; left:52px; top:2px;">${ceilTxt}</div>
+    <div class="sp-field" style="position:absolute; left:52px; top:22px;">${visTxt}</div>
+    <div class="sp-field sp-gust" style="position:absolute; left:18px; top:26px; width:34px; text-align:center;">${gustTxt}</div>`;
+}
+
+async function fetchStationPlotData() {
+  try {
+    const res = await fetch(`/api/weather/metar?bounds=${currentBoundsParam()}`);
+    const data = await res.json();
+    metarAvailable = !!data.available;
+    latestMetarByIcao = {};
+    if (metarAvailable) {
+      for (const m of data.metars) latestMetarByIcao[m.station_id] = m;
+    }
+  } catch (err) {
+    console.error("Failed to load station plot METAR", err);
+    metarAvailable = false;
+    latestMetarByIcao = {};
+  }
+  renderStationPlotMarkers();
+}
+
+// Re-renders from already-fetched data (latestAirfieldRows/latestMetarByIcao) --
+// no network call. Called instantly on zoom (barb-only <-> full-plot tier
+// transitions) and after every fetchStationPlotData()/refreshAirfields() update;
+// the network refetch itself stays on refreshAirfields's existing debounced
+// moveend cadence rather than a second timer.
+function renderStationPlotMarkers() {
+  if (airfieldDisplayMode !== "station-plot") return;
+  const statusEl = document.getElementById("airfield-mode-status");
+  const zoom = map.getZoom();
+  const seen = new Set();
+  for (const a of latestAirfieldRows) {
+    const minZ = STATION_PLOT_MIN_ZOOM[a.station_plot_tier] ?? 6;
+    if (zoom < minZ) continue;
+    seen.add(a.id);
+    const metar = a.icao_id ? latestMetarByIcao[a.icao_id] : null;
+    const showFull = zoom >= minZ + STATION_PLOT_FULL_ZOOM_OFFSET;
+    const [w, h] = metar ? stationPlotSize(showFull) : [10, 10];
+    const innerHtml = metar ? buildStationPlotInnerHtml(metar, showFull) : "";
+
+    let marker = stationPlotMarkers.get(a.id);
+    if (!marker) {
+      const el = document.createElement("div");
+      el.addEventListener("click", () => {
+        // No-data dots (marker._metar unset) aren't clickable -- nothing to show.
+        if (!marker._metar) return;
+        new maplibregl.Popup()
+          .setLngLat([a.longitude, a.latitude])
+          .setHTML(
+            `<strong>${marker._metar.station_id}</strong> ${marker._metar.flight_category ?? ""}<br><code>${marker._metar.raw_text ?? ""}</code>`
+          )
+          .addTo(map);
+      });
+      marker = new maplibregl.Marker({ element: el }).setLngLat([a.longitude, a.latitude]).addTo(map);
+      stationPlotMarkers.set(a.id, marker);
+    }
+    const el = marker.getElement();
+    el.className = metar ? "station-plot-marker" : "station-plot-marker station-plot-nodata";
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    el.innerHTML = innerHtml;
+    marker._metar = metar;
+  }
+  // Drop markers for airfields that fell out of the viewport/zoom-tier range.
+  for (const [id, marker] of stationPlotMarkers.entries()) {
+    if (!seen.has(id)) {
+      marker.remove();
+      stationPlotMarkers.delete(id);
+    }
+  }
+  statusEl.textContent = metarAvailable
+    ? `Station Plot (${Object.keys(latestMetarByIcao).length} reporting)`
+    : "Station Plot: METAR unavailable (WxCOP unreachable) — showing airfields only";
+}
+
+function setAirfieldDisplayMode(mode) {
+  airfieldDisplayMode = mode;
+  clearInterval(weatherPollInterval);
+  weatherPollInterval = null;
+  const statusEl = document.getElementById("airfield-mode-status");
+
+  if (mode === "tier") {
+    clearStationPlotMarkers();
+    if (map.getLayer("airfields-layer")) {
+      map.setLayoutProperty("airfields-layer", "visibility", "visible");
+      map.setPaintProperty("airfields-layer", "circle-color", ["case", ["get", "is_military"], "#c0392b", "#8a6d3b"]);
+    }
+    statusEl.textContent = "";
+    return;
+  }
+  if (mode === "impacts") {
+    clearStationPlotMarkers();
+    if (map.getLayer("airfields-layer")) map.setLayoutProperty("airfields-layer", "visibility", "visible");
+    fetchFlightImpactsData();
+    weatherPollInterval = setInterval(fetchFlightImpactsData, WEATHER_POLL_MS);
+    return;
+  }
+  // station-plot
+  if (map.getLayer("airfields-layer")) map.setLayoutProperty("airfields-layer", "visibility", "none");
+  fetchStationPlotData();
+  weatherPollInterval = setInterval(fetchStationPlotData, WEATHER_POLL_MS);
+}
+
+for (const el of document.querySelectorAll('input[name="airfield-mode"]')) {
+  el.addEventListener("change", (e) => {
+    if (e.target.checked) setAirfieldDisplayMode(e.target.value);
+  });
+}
 
 // Operations-area circle (REQUIREMENTS.md 3.2 locate-with-radius). Equirectangular
 // approximation -- accurate enough for the tens-of-nm radii this is meant for, not
@@ -1478,6 +1800,7 @@ document.getElementById("generate-report-btn").addEventListener("click", () => {
 map.on("load", refreshAirfields);
 map.on("moveend", scheduleAirfieldsRefresh); // covers both pan and zoom (zoom-only still fires moveend)
 map.on("zoom", updateAirfieldZoomFilter); // instant dot+label tier feedback, ahead of the debounced bbox refetch
+map.on("zoom", renderStationPlotMarkers); // instant barb-only/full-plot tier feedback, same reasoning; no-op unless that mode is active
 map.on("load", refreshSua);
 map.on("moveend", scheduleSuaRefresh);
 map.on("load", refreshGisLayerList);

@@ -62,6 +62,28 @@ def compute_tier(
     return 5
 
 
+def compute_station_plot_tier(
+    is_military: bool, hard_surface: bool | None, longest_runway_ft: float | None, hub_type: str | None = None
+) -> int:
+    """Separate tiering for the Station Plot display mode (REQUIREMENTS.md 3.3a),
+    deliberately NOT reusing compute_tier() above -- Gerry's explicit call (2026-10-14)
+    was to keep this decoupled from the dot-layer's tier field so each can be tuned
+    independently. Thresholds mirror EWMC's own station-plot tiering (military / hub /
+    regional>=7000ft / local 5000-6999ft / small 2500-4999ft) as a starting point, not
+    compute_tier()'s thresholds -- the zoom defaults these feed on the frontend are
+    deliberately set lower than EWMC's own (see main.js), since AvTrack is typically
+    opened already scoped to a single wing or region, not CONUS-wide like WxCOP."""
+    if is_military:
+        return 1
+    if hub_type in MAJOR_HUB_TYPES:
+        return 2
+    if hard_surface and longest_runway_ft and longest_runway_ft >= 7000:
+        return 3
+    if hard_surface and longest_runway_ft and 5000 <= longest_runway_ft < 7000:
+        return 4
+    return 5
+
+
 @router.get("", response_model=list[AirfieldOut])
 async def list_airfields(
     bounds: str | None = Query(None, description="west,south,east,north (WGS84) -- omit for no spatial filter"),
@@ -103,6 +125,9 @@ async def list_airfields(
                 hard_surface_available=a.hard_surface_available,
                 is_military=a.is_military,
                 tier=tier,
+                station_plot_tier=compute_station_plot_tier(
+                    a.is_military, a.hard_surface_available, a.longest_runway_ft, a.hub_type
+                ),
             )
         )
     return out

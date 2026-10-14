@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # so the grace period can be tuned independently of the base threshold.
     no_contact_warning_minutes: int = 30
     no_contact_grace_minutes: int = 10
+    # WxCOP integration (REQUIREMENTS.md 3.3a) -- airfield layer's Flight Impacts and
+    # Station Plot display modes, see app/integrations/wxcop_client.py for the
+    # connection-recipe rationale. Same kill-switch convention as adsb_polling_enabled.
+    wxcop_base_url: str = "http://192.168.0.200"
+    wxcop_host_header: str = "wxcop.duckdns.org"
+    wxcop_enabled: bool = True
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:

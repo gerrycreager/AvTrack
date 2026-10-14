@@ -78,6 +78,20 @@
     }
     .aircraft-datablock .cs { font-weight: 600; }
 
+    /* Station Plot markers (REQUIREMENTS.md 3.3a) -- same display:inline-block
+       requirement as .aircraft-marker above (MapLibre Marker centering needs the
+       element to shrink-wrap its actual content, not stretch to the viewport). */
+    .station-plot-marker {
+      position: relative; display: inline-block; cursor: pointer;
+      font: 10px ui-monospace, monospace; color: #e8eaed;
+      text-shadow: 0 0 2px #14181c, 0 0 2px #14181c, 0 0 2px #14181c;
+    }
+    .station-plot-marker.station-plot-nodata {
+      background: #808080; border-radius: 50%; border: 1px solid #cdd3d8;
+    }
+    .station-plot-marker .sp-field { white-space: nowrap; }
+    .station-plot-marker .sp-gust { color: #ff6b6b; font-weight: 700; } /* fixed hazard red, independent of flight-category color -- EWMC's own convention */
+
     /* Basemap switcher */
     #basemap-switcher { position: absolute; top: 10px; right: 202px; z-index: 1; }
     #basemap-switcher select { padding: 6px 8px; border-radius: 4px; border: 1px solid #888; }
@@ -92,6 +106,7 @@
     #layers-panel .divider { border-top: 1px solid #3a4048; margin: 10px 0; }
     #layers-panel label { display: block; margin-bottom: 4px; cursor: pointer; }
     #layers-panel .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
+    #airfield-mode-status { font-size: 10px; color: #9aa4ad; min-height: 1.2em; margin: -2px 0 2px; }
     #gis-upload-row { display: flex; gap: 4px; margin-bottom: 6px; }
     #gis-upload-row input[type="file"] { flex: 1; min-width: 0; font-size: 11px; color: #e8eaed; }
     #gis-upload-row button { padding: 4px 8px; border-radius: 4px; border: none; background: #2b6cb0; color: white; cursor: pointer; font-size: 11px; }
@@ -234,6 +249,12 @@
     <label><input type="checkbox" id="sua-prohib-toggle" /> <span class="swatch" style="background:#cc0000;"></span>Prohibited</label>
     <label><input type="checkbox" id="sua-restrict-toggle" /> <span class="swatch" style="background:#dc6400;"></span>Restricted</label>
     <label><input type="checkbox" id="sua-moa-toggle" /> <span class="swatch" style="background:#5000c8;"></span>MOA / Warning / Alert</label>
+    <div class="divider"></div>
+    <h3>Airfield Display</h3>
+    <label><input type="radio" name="airfield-mode" value="tier" checked /> Tier colors</label>
+    <label><input type="radio" name="airfield-mode" value="impacts" /> Flight Impacts</label>
+    <label><input type="radio" name="airfield-mode" value="station-plot" /> Station Plot</label>
+    <div id="airfield-mode-status"></div>
     <div class="divider"></div>
     <h3>Mission Layers</h3>
     <div id="gis-upload-row">
