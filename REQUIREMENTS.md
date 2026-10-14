@@ -805,11 +805,40 @@ follow the NIMS taskbook."
     departure runway >= calculated takeoff+landing ground roll; SFRO
     required when shorter [70-1 §9.11.3.4.7 = 70-10 draft §10.11.4.6].
 
+- **Flight Impacts & Station Plot airfield display modes (shipped 2026-10-14).**
+  `app/integrations/wxcop_client.py` (the previously-planned WxCOP client) now
+  exists, backing `GET /api/weather/impacts` and `GET /api/weather/metar`
+  (`app/api/weather.py`) — both same-origin proxies, always HTTP 200 with an
+  `available` flag, since WxCOP/data2 being unreachable is a real, expected
+  state to design for (data2 had an extended outage starting 2026-10-14, back
+  up the same day but mid-restart for a software update). The airfield layer
+  now has a single mutually-exclusive display-mode selector (Gerry's explicit
+  call — these don't stack): **Tier colors** (unchanged default), **Flight
+  Impacts** (recolors airfields by WxCOP's pre-computed Go/Caution/No-Go
+  `color`, grey fallback for unmatched/military/unreachable), **Station
+  Plot** (a METAR station plot — wind barb, sky cover, temp/dewpoint,
+  ceiling/visibility, flight-category color — rendered as a MapLibre DOM
+  marker per airfield, modeled directly on WxCOP's EWMC feature per Gerry's
+  request). Flight-category colors (VFR/MVFR/IFR/LIFR) are WxCOP's exact
+  values, confirmed by Gerry to match the USAF/ForeFlight/likely-FAA
+  convention, not just a WxCOP-specific choice. Station Plot uses its own
+  independent zoom-tiering (`station_plot_tier`, `compute_station_plot_tier()`
+  in `app/api/airfields.py`) rather than reusing the existing tier-colors
+  `tier` field — deliberately decoupled per Gerry, with default thresholds set
+  lower (more detail at a more zoomed-out view) than EWMC's own, since AvTrack
+  is typically opened already scoped to one wing (state-sized) or occasionally
+  a region (several wings), not CONUS-wide like WxCOP has to support — not yet
+  tuned against real field use. **Note on how this feature was scoped**:
+  unlike the TRACS research the same day (see the clean-sheet-design memory),
+  Gerry explicitly asked for this one to be modeled on WxCOP's own EWMC
+  feature, which he iteratively designed himself — so layout deviations from
+  the textbook synoptic station-plot (barb overlapping the sky-cover symbol,
+  gust always in fixed hazard red, no on-plot altimeter) were carried over
+  faithfully as his own deliberate choices, not something to "fix."
+  Verified live via Playwright against both the real (currently reachable)
+  WxCOP instance and a mocked unavailable response — both display modes and
+  the graceful-degradation path confirmed working with zero console errors.
 - **Explicitly not yet built** (scoped, not forgotten):
-  - Weather overlay on the map itself (Flight Category station plots +
-    whatever new encoding represents Flight Impacts — visual design still
-    open) and the WxCOP HTTP client (`app/integrations/wxcop_client.py`,
-    planned, not yet written).
   - User-selectable airfield pinning/highlighting, independent of the
     existing zoom-tier auto-reveal — per Gerry: "if the auto-expose as we
     zoom in isn't sufficient, the AOBD or OSC signed on to use this should be
