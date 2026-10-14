@@ -576,12 +576,43 @@ deliberate later phase. Grounded in actual CAP documentation, not generic NIMS
 taskbook assumptions, per Gerry's explicit correction: "CAP AOBD doesn't yet
 follow the NIMS taskbook."
 
-- **Research sources**: `/home/gerry/CAP/Training/AOBD/AOBD_course.pdf` (CAWG,
-  2002 — richest local doc on actual AOBD workflow, not a national taskbook but
-  the best grounding available), `CAPR 60-3(I)` (`R060_003_075A4369FBA8E.pdf`,
-  marked stale/superseded locally — §1-16d: AOBD "is responsible for ensuring
-  the safety of all air operations"), `CAPF 104` (Mission Flight Plan/Briefing
-  Form — briefer must be AOBD-trainee-or-higher, requires a qualified FRO).
+- **Research sources, and two sourcing corrections (2026-10-14)**: per Gerry,
+  "you MUST use national regulations unless there's a Region or Wing
+  supplement approved... don't look for a random regulation on the website
+  from, e.g., CAWG, and assume it holds nationally." Two things changed
+  about the regulation lineage used here as a result:
+  1. The live national publications index
+     (`gocivilairpatrol.com/members/publications` — explicitly fetchable per
+     Gerry, no real access restriction despite the "members" path) still
+     listed `CAPR 60-3(I)` (26 Dec 2012) as current when checked directly
+     2026-10-14. **But per Gerry directly: "CAP 60-3 is now a Cadet Services
+     publication"** — so the Ops/AOBD-relevant lineage is **CAPR 70-1
+     (current) → CAPR 70-10 (DRAFT, not yet issued)**, not 60-3(I); citations
+     below updated accordingly rather than left on a reg that's moved to a
+     different directorate.
+  2. `/home/gerry/CAP/Training/AOBD/AOBD_course.pdf` (CAWG, 2002) remains the
+     only local source for the Air Ops Status Board's actual layout
+     (Assigned Area, the ATD/ETE/ETA/ATA columns) and the overdue-escalation
+     workflow shape — **neither CAPR 70-1 nor the 70-10 draft specifies a
+     status-board layout at all**, so this is still genuinely wing-local
+     practice, labeled as such everywhere it's cited rather than presented
+     as a CAP-wide standard.
+  `CAPF 104` (Mission Flight Plan/Briefing Form — briefer must be
+  AOBD-trainee-or-higher, requires a qualified FRO) is a national form.
+  - **CAPR 70-1 (current, 31 MAR 2020 + ICL 25-03) read directly and
+    compared against the CAPR 70-10 draft, 2026-10-14** — see the ORM/
+    weather-threshold entry below for what's identical vs. what the draft
+    actually changes. One real discrepancy worth being precise about: the
+    "missing aircraft" follow-up time in the **current, in-effect** CAPR
+    70-1 §9.11.3.4.3 is **"no later than two hours"** from ETA, not one hour
+    — the 70-10 draft §10.11.4.5.3.1 is the one proposing to tighten this
+    to one hour. Gerry's recollection ("that's been the standard... for a
+    long time") was about the 1-hour figure specifically; per the actual
+    current regulation text, 2 hours is what's been standard, and 1 hour is
+    the new proposed tightening. The Ops Board's `default_overdue_threshold_minutes`
+    (60) matches the *proposed* draft standard, which is what Gerry asked
+    for built regardless — flagged here so the distinction stays traceable
+    if 70-10's final issued text changes before it's formally in effect.
   Also researched: required comms calls per **CAPR 100-3** §3.3.2 (Ops Normal
   checks — interval is NCS/CUL-set *locally*, not a fixed CAP-wide number —
   this directly validates the per-sortie `overdue_threshold_minutes` design
@@ -734,22 +765,30 @@ follow the NIMS taskbook."
   precision: CAPF 70-1 ("Pre-Flight Risk Assessment Worksheet," a form)
   is a different thing from the now-superseded CAPR 70-1 (the
   regulation) — easy to conflate, kept distinct in this doc going forward.
-  Key content, not yet acted on beyond the overdue-threshold change above:
-  - §10.11.4.2 — who may release a flight, by ORM score (a Risk Assessment
-    Worksheet produces a numeric score): FRO 0-14, SFRO 15-29, SFRO + Wing
-    CC/CD/DO concurrence 30-59, CAP/DO or designee via NOC greater than 60.
-  - §10.11.4.7 — IFR release weather thresholds, separate from the ORM
-    score: any FRO may approve >= 800ft ceiling AND >= 2SM visibility (or
-    approach minimums, whichever higher); SFRO required for < 800-2 but
-    >= 500-1; SFRO + Wing CC/CD/DO concurrence required down to FAA minimums.
-    Candidate source for Flight Impacts' actual Go/Caution/No-Go
-    breakpoints once that feature is built, in place of whatever WxCOP's
-    current CAPR-70-1-era Stoplight logic uses — not yet compared against
-    `ingest_glmp_impacts.py`'s existing thresholds, worth checking before
-    building the airfield-coloring feature.
-  - §10.11.4.6 — runway-length vs. TOLD: any FRO may approve when
+  Key content, compared directly against current CAPR 70-1 §9.11.3.4
+  (same local file already cited for the Alternate Flight Following
+  procedures above), not yet acted on beyond the overdue-threshold change:
+  - **ORM score release-authority bands — new to the 70-10 draft.**
+    §10.11.4.2: FRO 0-14, SFRO 15-29, SFRO + Wing CC/CD/DO concurrence
+    30-59, CAP/DO or designee via NOC greater than 60. Current CAPR 70-1
+    §9.11.3.4.2 does **not** hardcode these numbers in the regulation text
+    — it says CAP/DO publishes the score ranges separately in WMIRS, so
+    this specific set of numbers can only be verified against the draft,
+    not independently against the current regulation's own text.
+  - **IFR release weather thresholds — unchanged between current 70-1 and
+    the 70-10 draft**, confirmed by reading both directly: any FRO may
+    approve >= 800ft ceiling AND >= 2SM visibility (or approach minimums,
+    whichever higher) [70-1 §9.11.3.4.8.1 = 70-10 draft §10.11.4.7.3]; SFRO
+    required for < 800-2 but >= 500-1 [§9.11.3.4.8.2 = §10.11.4.7.4]; SFRO +
+    Wing CC/CD/DO concurrence required down to FAA minimums
+    [§9.11.3.4.8.3 = §10.11.4.7.5]. Safe to use as the Flight Impacts
+    feature's Go/Caution/No-Go breakpoints regardless of which regulation
+    is technically in force by the time that ships — not yet compared
+    against WxCOP's own `ingest_glmp_impacts.py` thresholds, worth checking
+    before building the airfield-coloring feature.
+  - **Runway-length vs. TOLD — also unchanged**: any FRO may approve when
     departure runway >= calculated takeoff+landing ground roll; SFRO
-    required when shorter.
+    required when shorter [70-1 §9.11.3.4.7 = 70-10 draft §10.11.4.6].
 
 - **Explicitly not yet built** (scoped, not forgotten):
   - Weather overlay on the map itself (Flight Category station plots +
