@@ -12,7 +12,7 @@ separate from airspace.py despite both being geo-data.
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,11 +25,24 @@ router = APIRouter(prefix="/api/discovered", tags=["discovered"])
 
 
 @router.get("", response_model=list[DiscoveredCallsignOut])
-async def list_discovered(session: AsyncSession = Depends(get_session)):
-    """Active (non-dismissed) discovered CAP/PARD candidates, AO-filtered when an
-    AO is set. AO membership is computed here at read time, not stored -- see
-    DiscoveredCallsign's docstring for why."""
+async def list_discovered(
+    ao_filter: bool = Query(True, description="If false, ignore the AO and return all non-dismissed candidates nationwide"),
+    session: AsyncSession = Depends(get_session),
+):
+    """Active (non-dismissed) discovered CAP/PARD candidates, AO-filtered by
+    default. AO membership is computed here at read time, not stored -- see
+    DiscoveredCallsign's docstring for why.
+
+    `ao_filter=false` (added 2026-10-15, used by the map's always-on candidate
+    markers -- see frontend/src/main.js refreshDiscoveredMarkers()) bypasses the
+    AO entirely: per Gerry, "the aircraft should display on-screen when they are
+    flying [regardless of our ongoing operation]... they'd not be in an
+    operations table." General map situational awareness is unscoped; only the
+    Ops Board's actionable alert list (the default, AO-scoped behavior here)
+    is operation-specific."""
     rows = (await session.execute(select(DiscoveredCallsign).where(DiscoveredCallsign.dismissed_at.is_(None)))).scalars().all()
+    if not ao_filter:
+        return rows
     ao = (await session.execute(select(OperationsArea))).scalars().first()
     if ao is None:
         return rows

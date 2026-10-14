@@ -151,6 +151,25 @@ const latestByTail = new Map(); // tail_number -> last position payload, for the
 // not the paired floor Gerry wants. Tiers 1 and 2 now share the same zoom-0 floor.
 const TIER_MIN_ZOOM = { 1: 0, 2: 0, 3: 7, 4: 12, 5: 14 };
 
+// Airfield LABEL tier coloring (REQUIREMENTS.md 3.2, added 2026-10-15) -- per
+// Gerry: "just like EWMC, Airfield tier (mil vs civ) should be reflected on the
+// LABEL color and not a radio button selection. It's toggled with labels." Ported
+// from EWMC's `.apt-t1`..`.apt-t5` CSS pill classes
+// (enhanced_weather_map_complete.html on r815, lines ~124-156): military is always
+// tier 1 (red), civilian airfields fall into tiers 2-5 by hub/runway length --
+// same `tier` field airfields-layer's dot used to be colored by (see below for why
+// that moved here). EWMC renders these as a colored CSS background pill on a
+// Leaflet divIcon; MapLibre's native symbol-layer text has no background-box
+// equivalent, so this approximates the pill with text-color + a heavier
+// text-halo-color outline rather than a true filled background -- a deliberate
+// adaptation to the GL renderer, not a claim of pixel parity with EWMC's HTML
+// markers. Applied once, statically, on the label layer itself (not touched by
+// setAirfieldDisplayMode) so it shows whenever labels are on, independent of
+// whichever dot-coloring mode (Flight Impacts/Station Plot) is selected -- exactly
+// the "not a radio button selection" part of the ask.
+const AIRFIELD_TIER_TEXT_COLORS = { 1: "#ffffff", 2: "#ffffff", 3: "#111111", 4: "#111111", 5: "#333333" };
+const AIRFIELD_TIER_HALO_COLORS = { 1: "#c81e1e", 2: "#1950c8", 3: "#c8c8c8", 4: "#5a9a5a", 5: "#9a9ad2" };
+
 let labelsVisible = true;
 let airfieldsFetchTimer = null;
 
@@ -223,7 +242,11 @@ async function refreshAirfields() {
           // that below zoom 5 -- MapLibre holds the first stop's value below its
           // lowest zoom) was barely visible at the map's own 3.2 startup zoom.
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 3, 4, 6, 5, 10, 7, 14, 10],
-          "circle-color": ["case", ["get", "is_military"], "#c0392b", "#8a6d3b"],
+          // Neutral as of 2026-10-15 -- mil/civ moved to the LABEL's tier coloring
+          // below (see AIRFIELD_TIER_TEXT_COLORS/AIRFIELD_TIER_HALO_COLORS), per
+          // Gerry's "not a radio button selection" direction. This is also what
+          // setAirfieldDisplayMode("tier") resets it to.
+          "circle-color": "#5b6b7a",
           "circle-stroke-color": "#fff",
           "circle-stroke-width": 1.5,
         },
@@ -239,7 +262,11 @@ async function refreshAirfields() {
           "text-offset": [0, 1.1],
           "text-anchor": "top",
         },
-        paint: { "text-color": "#e8eaed", "text-halo-color": "#14181c", "text-halo-width": 1 },
+        paint: {
+          "text-color": ["match", ["get", "tier"], 1, AIRFIELD_TIER_TEXT_COLORS[1], 2, AIRFIELD_TIER_TEXT_COLORS[2], 3, AIRFIELD_TIER_TEXT_COLORS[3], 4, AIRFIELD_TIER_TEXT_COLORS[4], AIRFIELD_TIER_TEXT_COLORS[5]],
+          "text-halo-color": ["match", ["get", "tier"], 1, AIRFIELD_TIER_HALO_COLORS[1], 2, AIRFIELD_TIER_HALO_COLORS[2], 3, AIRFIELD_TIER_HALO_COLORS[3], 4, AIRFIELD_TIER_HALO_COLORS[4], AIRFIELD_TIER_HALO_COLORS[5]],
+          "text-halo-width": 1.6,
+        },
       });
       map.on("click", "airfields-layer", (e) => {
         const p = e.features[0].properties;
@@ -567,7 +594,7 @@ function setAirfieldDisplayMode(mode) {
     clearStationPlotMarkers();
     if (map.getLayer("airfields-layer")) {
       map.setLayoutProperty("airfields-layer", "visibility", "visible");
-      map.setPaintProperty("airfields-layer", "circle-color", ["case", ["get", "is_military"], "#c0392b", "#8a6d3b"]);
+      map.setPaintProperty("airfields-layer", "circle-color", "#5b6b7a"); // neutral -- mil/civ now lives on the label, see AIRFIELD_TIER_TEXT_COLORS
     }
     statusEl.textContent = "";
     return;
@@ -647,6 +674,11 @@ async function loadKnownAircraft() {
   }
 }
 
+// Whether an AO is currently set -- tracked client-side (added 2026-10-15) purely
+// so renderDiscoveredSection below can phrase its count correctly ("in AO" vs
+// nationwide); the actual filtering is always done server-side.
+let aoIsSet = false;
+
 // Restores the persisted Area of Operations on page load (REQUIREMENTS.md 3.1,
 // added 2026-10-14) so a refresh doesn't visually lose the AO the backend still
 // has -- the AO is otherwise only (re-)drawn from a fresh locate() call.
@@ -655,6 +687,7 @@ async function loadPersistedOpsArea() {
     const res = await fetch("/api/discovered/ao");
     if (!res.ok) return;
     const ao = await res.json();
+    aoIsSet = !!ao;
     if (ao) setOpsArea([ao.center_longitude, ao.center_latitude], ao.radius_nm);
   } catch (err) {
     console.error("Failed to load persisted Area of Operations", err);
@@ -761,6 +794,109 @@ function verticalTrendArrow(trend) {
 function airborneState(pos) {
   return pos.altitude_ft != null && pos.altitude_ft > 0 ? "airborne" : "ground";
 }
+
+// Discovered (unregistered) CAP/PARD candidates currently flying -- shown
+// directly on the map (REQUIREMENTS.md 3.1, added 2026-10-15). Per Gerry: "The
+// aircraft should display on-screen when they are flying. If they're not part
+// of our ongoing operation, not accepted from the candidates' table, they'd not
+// be in an operations table for query." So this is general situational
+// awareness, deliberately unscoped by the AO (`ao_filter=false` -- see
+// app/api/discovered.py) -- separate from the Ops Board's AO-scoped alert
+// section (renderDiscoveredSection below), which stays operation-specific.
+// A candidate here has never been polled for a live position (poll_once() in
+// app/ingestion/poller.py only ever tracks registered tails) -- its position is
+// only as fresh as the last discovery sweep (the fast AO-scoped poller when an
+// AO is set, or the slow 22-point CONUS sweep otherwise), so "recently
+// discovered" is a proxy for "currently flying," not true live tracking. A
+// candidate drops off the map once its last sighting goes stale, same
+// reasoning as sweepStaleAircraft above for registered aircraft.
+const discoveredMarkers = new Map(); // DiscoveredCallsign.id -> maplibregl.Marker
+const DISCOVERED_STALE_MINUTES = 20; // comfortably under the slow sweep's ~33min full-grid cycle so a still-flying candidate doesn't flicker out between its own sightings
+const DISCOVERED_POLL_MS = 45000;
+
+function approveDiscovered(id) {
+  return fetch(`/api/discovered/${id}/approve`, { method: "POST" })
+    .then(() => Promise.all([loadKnownAircraft(), refreshDiscoveredMarkers()]))
+    .then(() => {
+      if (!document.getElementById("ops-board-panel").hidden) refreshOpsBoard();
+    });
+}
+
+function dismissDiscovered(id) {
+  return fetch(`/api/discovered/${id}/dismiss`, { method: "POST" })
+    .then(() => refreshDiscoveredMarkers())
+    .then(() => {
+      if (!document.getElementById("ops-board-panel").hidden) refreshOpsBoard();
+    });
+}
+
+async function refreshDiscoveredMarkers() {
+  let rows;
+  try {
+    const res = await fetch("/api/discovered?ao_filter=false");
+    rows = await res.json();
+  } catch (err) {
+    console.error("Failed to load discovered candidates", err);
+    return;
+  }
+  const now = Date.now();
+  const live = rows.filter(
+    (r) =>
+      now - new Date(r.last_seen_at).getTime() < DISCOVERED_STALE_MINUTES * 60000 &&
+      r.last_latitude != null &&
+      r.last_longitude != null
+  );
+  const liveIds = new Set(live.map((r) => r.id));
+  for (const [id, marker] of discoveredMarkers) {
+    if (!liveIds.has(id)) {
+      marker.remove();
+      discoveredMarkers.delete(id);
+    }
+  }
+  for (const r of live) {
+    let marker = discoveredMarkers.get(r.id);
+    if (!marker) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "discovered-marker";
+      const dot = document.createElement("div");
+      dot.className = "discovered-dot";
+      dot.innerHTML = AIRCRAFT_SVG;
+      const datablock = document.createElement("div");
+      datablock.className = "discovered-datablock";
+      wrapper.appendChild(dot);
+      wrapper.appendChild(datablock);
+      wrapper.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const popup = new maplibregl.Popup({ closeButton: true })
+          .setLngLat(marker.getLngLat())
+          .setHTML(
+            `<div style="font-size:12px;"><strong>${r.source_label} ${r.callsign}</strong> / ${r.tail_number}<br/>
+             Unregistered -- not part of any tracked operation<br/>
+             <button class="discovered-approve" data-id="${r.id}">Approve</button>
+             <button class="discovered-dismiss" data-id="${r.id}">Dismiss</button></div>`
+          )
+          .addTo(map);
+        const el = popup.getElement();
+        el.querySelector(".discovered-approve").addEventListener("click", () => {
+          approveDiscovered(r.id);
+          popup.remove();
+        });
+        el.querySelector(".discovered-dismiss").addEventListener("click", () => {
+          dismissDiscovered(r.id);
+          popup.remove();
+        });
+      });
+      marker = new maplibregl.Marker({ element: wrapper }).setLngLat([r.last_longitude, r.last_latitude]).addTo(map);
+      marker._datablock = datablock;
+      discoveredMarkers.set(r.id, marker);
+    } else {
+      marker.setLngLat([r.last_longitude, r.last_latitude]);
+    }
+    marker._datablock.innerHTML = `<div class="cs">${r.callsign}</div><div>${r.tail_number}</div>`;
+  }
+}
+
+setInterval(refreshDiscoveredMarkers, DISCOVERED_POLL_MS);
 
 // Sidebar shows every LOADED tail (knownAircraft, from the roster), not just
 // ones currently transmitting -- added 2026-09-15 per Gerry: "we need to see
@@ -1409,7 +1545,7 @@ function renderDiscoveredSection(rows) {
   }
   el.innerHTML = `
     <div class="discovered-alert">
-      <strong class="missing-flag">${rows.length} unregistered CAP/PARD aircraft in AO</strong>
+      <strong class="missing-flag">${rows.length} unregistered CAP/PARD aircraft${aoIsSet ? " in AO" : " (no AO set -- showing all)"}</strong>
       ${rows
         .map(
           (r) => `
@@ -1421,19 +1557,11 @@ function renderDiscoveredSection(rows) {
         )
         .join("")}
     </div>`;
-  el.querySelectorAll(".discovered-approve").forEach((btn) =>
-    btn.addEventListener("click", async () => {
-      await fetch(`/api/discovered/${btn.dataset.id}/approve`, { method: "POST" });
-      await loadKnownAircraft();
-      refreshOpsBoard();
-    })
-  );
-  el.querySelectorAll(".discovered-dismiss").forEach((btn) =>
-    btn.addEventListener("click", async () => {
-      await fetch(`/api/discovered/${btn.dataset.id}/dismiss`, { method: "POST" });
-      refreshOpsBoard();
-    })
-  );
+  // approveDiscovered/dismissDiscovered already refresh the Ops Board themselves
+  // when it's open (see their definitions above) -- this section only renders
+  // while it is, so no extra refresh call is needed here.
+  el.querySelectorAll(".discovered-approve").forEach((btn) => btn.addEventListener("click", () => approveDiscovered(btn.dataset.id)));
+  el.querySelectorAll(".discovered-dismiss").forEach((btn) => btn.addEventListener("click", () => dismissDiscovered(btn.dataset.id)));
 }
 
 function renderOpsBoardTable(rows) {
@@ -1589,7 +1717,11 @@ async function locate(query) {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ center_latitude: latitude, center_longitude: longitude, radius_nm: radiusNm }),
-    }).catch((err) => console.error("Failed to persist Area of Operations:", err));
+    })
+      .then((r) => {
+        if (r.ok) aoIsSet = true;
+      })
+      .catch((err) => console.error("Failed to persist Area of Operations:", err));
   }
   if (bounds) {
     setMgrsBox(bounds);
@@ -1843,8 +1975,17 @@ document.getElementById("roster-upload-btn").addEventListener("click", async () 
 // datetime-local (not the rapid HHMM fields used elsewhere) since a period can
 // span multiple days -- this is a deliberate occasional action, not rapid-fire
 // radio logging, so a native date+time picker is the right tool here.
+// Fixed to UTC (added 2026-10-15 per Gerry: "those should be in 24 hr clock, in
+// UTC"), deliberately NOT `displayTimezone` -- the generated PDF itself is always
+// Zulu (see reports.py), so letting these fields follow whatever convenience
+// display zone the rest of the app happens to be set to would let what you type
+// drift out of sync with what the official document actually prints. The
+// underlying <input type="datetime-local"> value is already `hourCycle: "h23"`
+// (24hr) via utcToZonedInputValue -- only the browser's own on-screen rendering
+// of that native widget (locale-dependent, outside this app's control) could
+// still show it differently.
 function defaultReportEndValue() {
-  return utcToZonedInputValue(new Date(), displayTimezone).slice(0, 16); // datetime-local wants no seconds
+  return utcToZonedInputValue(new Date(), "UTC").slice(0, 16); // datetime-local wants no seconds
 }
 document.getElementById("report-end").value = defaultReportEndValue();
 
@@ -1855,8 +1996,8 @@ document.getElementById("generate-report-btn").addEventListener("click", () => {
     alert("Start time is required.");
     return;
   }
-  const startUtc = zonedInputValueToUtc(`${startVal}:00`, displayTimezone).toISOString();
-  const endUtc = zonedInputValueToUtc(`${endVal}:00`, displayTimezone).toISOString();
+  const startUtc = zonedInputValueToUtc(`${startVal}:00`, "UTC").toISOString();
+  const endUtc = zonedInputValueToUtc(`${endVal}:00`, "UTC").toISOString();
   window.open(`/api/reports/comms-log?start=${encodeURIComponent(startUtc)}&end=${encodeURIComponent(endUtc)}`, "_blank");
 });
 
@@ -1869,3 +2010,4 @@ map.on("moveend", scheduleSuaRefresh);
 map.on("load", refreshGisLayerList);
 loadKnownAircraft().then(connectWebSocket);
 loadPersistedOpsArea();
+refreshDiscoveredMarkers();

@@ -91,6 +91,25 @@ is reusable as the Phase 2 server's schema — not thrown away.
   CONUS-sweep candidates correctly AO-filtered in/out as a candidate's position
   was moved relative to the AO; approve/dismiss verified via curl and Playwright
   (Ops Board panel) against isolated fake test tails, cleaned up afterward.
+  **Candidates also shown directly on the map — added 2026-10-15**: per Gerry,
+  "the aircraft should display on-screen when they are flying. If they're not
+  part of our ongoing operation, not accepted from the candidates' table,
+  they'd not be in an operations table for query." The Ops Board section above
+  stays AO-scoped (operation-specific); this is separate, general situational
+  awareness, deliberately unscoped (`GET /api/discovered?ao_filter=false`).
+  A candidate's position is only as fresh as the last discovery sweep (never
+  true live tracking, since `poll_once()` only ever polls registered tails) —
+  shown as a distinct amber/dashed marker (reusing the existing aircraft-icon
+  DOM-marker pattern, not the websocket-fed live-position one) as long as its
+  last sighting is under 20 minutes old, then dropped. Clicking one opens a
+  popup with Approve/Dismiss, same one-click semantics as the Ops Board
+  section, sharing the same two endpoints via new `approveDiscovered`/
+  `dismissDiscovered` helpers. Verified live against real (not fake) discovered
+  candidates nationwide — caught and corrected one real mistake while doing so:
+  a test click accidentally approved a genuine candidate (N207CA/CAP3727) into
+  the roster, reverted immediately via psql + clearing `dismissed_at` so it
+  returned to pending for Gerry's own review, rather than left in the live
+  roster as a side effect of testing.
 - **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
   figure (datablock and side panel both), ATC-datablock-style. Computed in
   `app/ingestion/poller.py` from consecutive real position deltas (altitude change
@@ -203,6 +222,28 @@ is reusable as the Phase 2 server's schema — not thrown away.
     "at min zoom... MIL and major air carrier hubs" as the intended baseline
     together, not military-only until zoom 3). Dropped to 244 rendered dots
     CONUS-wide at startup (from 529), all genuinely military or major-hub.
+  - **Mil/civ moved from the dot to the LABEL — changed 2026-10-15**: per Gerry,
+    "just like EWMC, Airfield tier (mil vs civ) should be reflected on the
+    LABEL color and not a radio button selection. It's toggled with labels."
+    Previously mil/civ only showed up if you happened to have the "Tier
+    colors" radio option selected on the airfield-display-mode selector (added
+    2026-10-14 for Flight Impacts/Station Plot) — picking Flight Impacts or
+    Station Plot instead made it disappear entirely. Checked EWMC's actual
+    implementation (`enhanced_weather_map_complete.html` on r815) rather than
+    guess: there, the dot is colored by flight category (VFR/MVFR/IFR/LIFR),
+    and mil/civ is carried *only* by the label — a 5-tier CSS pill
+    (`.apt-t1`..`.apt-t5`: military always tier 1/red, civilian tiers 2-5 by
+    hub/runway length), applied whenever a label renders, gated only by the
+    labels visibility toggle, never a separate "mode." Ported that split:
+    `airfields-layer`'s dot is now a flat neutral `#5b6b7a` in the renamed
+    "Default" mode (mil/civ no longer lives there at all), and
+    `airfields-label`'s `text-color`/`text-halo-color` are a `tier`-keyed
+    `match` expression mirroring EWMC's 5 colors, set once at layer creation —
+    not touched by `setAirfieldDisplayMode()` — so it's on whenever labels are,
+    regardless of which dot-coloring mode is active. One deliberate
+    adaptation, not claimed as pixel-parity: MapLibre symbol-layer text has no
+    CSS background-box equivalent to EWMC's colored pill, so a heavier
+    `text-halo-color` approximates it instead of a true filled background.
 - **Area of Operations (AO) / Area of Interest (AOI) — desirement, not yet built**:
   Gerry wants to be able to identify airfields within an AO and/or a (typically
   larger) AOI specifically for label purposes, selected either by (a) a list-input of
@@ -456,6 +497,17 @@ is reusable as the Phase 2 server's schema — not thrown away.
     "nothing happened this period" rather than "your input was ambiguous."
     Fixed by explicitly treating naive input as UTC rather than leaving it to
     whatever the database driver does by default.
+    **Start/End fields pinned to UTC — fixed 2026-10-15**: per Gerry, "those
+    should be in 24 hr clock, in UTC." The backend-generated PDF itself was
+    already always Zulu/24hr; the gap was the input fields, which previously
+    followed the app's global `displayTimezone` convenience toggle (defaults to
+    UTC, but user-switchable, affecting every other time display in the app) —
+    so if that toggle wasn't on UTC, what you typed could silently drift out of
+    sync with what the official document actually printed. Now hardcoded to
+    `"UTC"` regardless of that toggle, with an explicit "(UTC)" label on both
+    fields. The native `datetime-local` widget's on-screen 12h/24h rendering is
+    otherwise a browser/OS locale setting outside this app's control; the
+    underlying value is already forced 24hr (`hourCycle: "h23"`).
     **Mission #/Sortie # added 2026-09-14** per Gerry: "we need to add the
     mission number at the top and the sortie to each entry." Resolves through
     `TrackingEvent.sortie_id` (added the same day for the sortie-linkage fix
