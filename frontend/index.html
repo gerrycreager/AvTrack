@@ -51,7 +51,18 @@
        correctly -- which is exactly the "datablock with no aircraft icon" symptom
        this was reported as. Confirmed via getBoundingClientRect, not just computed
        style -- a computed-style-only check earlier had missed this entirely. */
-    .aircraft-marker { position: relative; cursor: pointer; display: inline-block; }
+    /* position:absolute is load-bearing, not cosmetic (found live 2026-10-15):
+       maplibre-gl.css's own .maplibregl-marker rule sets position:absolute so
+       each marker's geo-referenced transform is independent of DOM order; a
+       same-specificity position:relative here (this stylesheet loads after
+       maplibre-gl.css) overrides that and puts the marker back into normal
+       document flow, so its rendered position becomes "true geographic
+       position + the cumulative width of every earlier sibling marker" --
+       invisible with only one marker on screen (no earlier siblings to add
+       up), but a growing, very real drift once several render at once. Found
+       via the new discovered-candidate markers (many on screen simultaneously)
+       after Gerry reported CAP826 appearing far from its true position. */
+    .aircraft-marker { position: absolute; cursor: pointer; display: inline-block; }
     /* Directional aircraft glyph. Was a plain circle (rotation was a no-op -- a
        circle looks identical at any angle), then a CSS clip-path dart/kite shape
        (fixed 2026-09-13). Now an inline SVG (2026-09-13, per Gerry) tracing a
@@ -82,7 +93,7 @@
        requirement as .aircraft-marker above (MapLibre Marker centering needs the
        element to shrink-wrap its actual content, not stretch to the viewport). */
     .station-plot-marker {
-      position: relative; display: inline-block; cursor: pointer;
+      position: absolute; display: inline-block; cursor: pointer; /* see .aircraft-marker's comment -- same fix */
       font: 10px ui-monospace, monospace; color: #e8eaed;
       text-shadow: 0 0 2px #14181c, 0 0 2px #14181c, 0 0 2px #14181c;
     }
@@ -161,7 +172,7 @@
        centering). Amber/dashed to read as distinctly "not yet part of this
        operation" -- different from both the known-aircraft blue and the
        unlisted-but-tracked red convention used elsewhere. */
-    .discovered-marker { position: relative; cursor: pointer; display: inline-block; }
+    .discovered-marker { position: absolute; cursor: pointer; display: inline-block; } /* see .aircraft-marker's comment -- same fix */
     .discovered-dot { width: 40px; height: 40px; display: block; color: #ff9800; }
     .discovered-dot svg { width: 100%; height: 100%; display: block; }
     .discovered-datablock {
