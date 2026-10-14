@@ -15,10 +15,24 @@ whichever is more recent.
 
 Per CAPR 100-3 S3.3.2, the Ops Normal check-in interval is set locally by the Net
 Control Station / Communications Unit Leader for the mission, not a fixed CAP-wide
-number -- confirmed by direct regulation research 2026-10-01. The CAWG AOBD
-course's own ">10 minutes" is a CAWG-local default, not a national standard. This
-is exactly why `overdue_threshold_minutes` is a per-sortie override (falling back
-to Settings.default_overdue_threshold_minutes) rather than a hardcoded constant.
+number -- confirmed by direct regulation research 2026-10-01. This is exactly why
+`overdue_threshold_minutes` is a per-sortie override (falling back to
+Settings.default_overdue_threshold_minutes) rather than a hardcoded constant.
+
+**Two independent alert conditions, added 2026-10-14 per Gerry** -- replacing the
+original single `overdue` flag's visual weight (it's still computed and shown, but
+on its own no longer triggers strong alerting):
+- **`no_contact_warning`** (soft, "orange halo, slow flashing"): purely "haven't
+  heard from this aircraft in a while" -- independent of ETA entirely, fires at
+  `no_contact_warning_minutes + no_contact_grace_minutes` (30+10=40 by default)
+  minutes since Last Ops Normal.
+- **`missing`** (hard, "flashing red"): the CAPR 70-10 "missing aircraft" case --
+  overdue past ETA by the threshold AND no contact for that same threshold
+  (default 60/60, both from the same `overdue_threshold_minutes`, not two separate
+  numbers -- Gerry: "overdue... by an hour AND has not been communicated with for
+  an hour"). Plain lateness without a contact gap, or a contact gap without also
+  being past ETA, is each still visible in the data but deliberately NOT this
+  alert -- Gerry: "that's a different issue."
 """
 
 from datetime import datetime, timedelta, timezone
@@ -83,13 +97,26 @@ async def get_ops_board(
             last_ops_normal_utc = position.ts_utc
 
         threshold_minutes = sortie.overdue_threshold_minutes or settings.default_overdue_threshold_minutes
+        still_open = ata_utc is None
+
         overdue = False
         overdue_minutes = None
-        if ata_utc is None and eta_utc is not None:
+        if still_open and eta_utc is not None:
             overdue_since = eta_utc + timedelta(minutes=threshold_minutes)
             if now > overdue_since:
                 overdue = True
                 overdue_minutes = round((now - overdue_since).total_seconds() / 60)
+
+        last_contact_minutes = None
+        no_contact_warning = False
+        if still_open and last_ops_normal_utc is not None:
+            last_contact_minutes = round((now - last_ops_normal_utc).total_seconds() / 60)
+            no_contact_trigger = settings.no_contact_warning_minutes + settings.no_contact_grace_minutes
+            no_contact_warning = last_contact_minutes >= no_contact_trigger
+
+        # "Missing" (CAPR 70-10's formal trigger): both halves true at once, not
+        # either alone -- see module docstring.
+        missing = overdue and last_contact_minutes is not None and last_contact_minutes >= threshold_minutes
 
         # State naming matches the sidebar's existing convention exactly
         # (STATE_LABEL in main.js: airborne/ground/"not-reporting") plus "complete",
@@ -120,6 +147,9 @@ async def get_ops_board(
                 last_ops_normal_utc=last_ops_normal_utc,
                 overdue=overdue,
                 overdue_minutes=overdue_minutes,
+                last_contact_minutes=last_contact_minutes,
+                no_contact_warning=no_contact_warning,
+                missing=missing,
                 state=state,
             )
         )

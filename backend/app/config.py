@@ -35,10 +35,24 @@ class Settings(BaseSettings):
     # defaults on independently of adsb_polling_enabled -- see app/adsb/adsb_lol.py.
     adsblol_polling_enabled: bool = True
     adsblol_poll_interval_seconds: int = 30
-    # Air Ops Status Board (REQUIREMENTS.md 3.3) overdue trigger, minutes past the
-    # computed ETA -- the CAWG AOBD course's own documented default. Per-sortie
-    # overridable via Sortie.overdue_threshold_minutes; this is only the fallback.
-    default_overdue_threshold_minutes: int = 10
+    # Air Ops Status Board (REQUIREMENTS.md 3.3) "missing aircraft" trigger, minutes
+    # past the computed ETA -- changed 2026-10-14 from the CAWG AOBD course's local
+    # 10-minute default to CAPR 70-10 draft S10.11.4.5.3.1's national "missing
+    # aircraft follow-up time not later than one hour after ETA" ("that's been the
+    # standard for CAP and FAA for a long time" -- Gerry). Per-sortie overridable
+    # via Sortie.overdue_threshold_minutes; this is only the fallback. Used for BOTH
+    # halves of the "missing" alert (see ops_board.py): overdue past ETA by this
+    # much AND no contact for this long -- not two separate numbers, per Gerry's
+    # "an hour AND an hour" framing.
+    default_overdue_threshold_minutes: int = 60
+    # Independent early-warning threshold (REQUIREMENTS.md 3.3, added 2026-10-14) --
+    # NOT tied to ETA/overdue at all, purely "haven't heard from this aircraft in a
+    # while." Per Gerry: "a slow flashing reminder if an aircraft has not been heard
+    # from in 30 min... a 10 min grace period on comms beyond the 30 min no
+    # contact" -- the actual trigger is the sum of these two, not a single number,
+    # so the grace period can be tuned independently of the base threshold.
+    no_contact_warning_minutes: int = 30
+    no_contact_grace_minutes: int = 10
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:

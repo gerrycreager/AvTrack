@@ -621,10 +621,49 @@ follow the NIMS taskbook."
     convention rather than another place state can drift.
   - **Overdue trigger**: >N minutes past ETA, still open (no `ata_utc`),
     where N is `Sortie.overdue_threshold_minutes` or
-    `Settings.default_overdue_threshold_minutes` (10, the CAWG course's
-    default) — confirmed CAP-wide via CAPR 100-3 that this interval is
-    genuinely locally-set, not a fixed national number, so the per-sortie
-    override isn't speculative design, it's regulation-grounded.
+    `Settings.default_overdue_threshold_minutes` — per-sortie overridable
+    because CAPR 100-3 confirms the underlying Ops Normal check-in interval
+    is genuinely locally NCS/CUL-set, not a fixed national number. **Default
+    changed 2026-10-14** from 10 (the CAWG course's wing-local figure,
+    initially used for lack of a better source) to **60**, per CAPR 70-10
+    draft §10.11.4.5.3.1's national "missing aircraft follow-up time not
+    later than one hour after ETA" — Gerry: "that's been the standard for
+    CAP and FAA for a long time," confirmed by reading the actual 70-10
+    draft (`~/CAP/CAPR 70-10 Complete.pdf`), not assumed.
+  - **Two independent alert conditions, added 2026-10-14** — replacing plain
+    `overdue`'s visual weight entirely (it's still computed and shown as a
+    data point, but no longer itself triggers strong alerting, per Gerry:
+    "that's a different issue"):
+    - **`no_contact_warning`** (soft — "a slow flashing reminder... orange
+      halo"): purely time-since-Last-Ops-Normal, independent of ETA/overdue
+      entirely. Fires at `Settings.no_contact_warning_minutes` (30) +
+      `Settings.no_contact_grace_minutes` (10) = 40 minutes of silence by
+      default — two separate settings, not one number, specifically so the
+      grace period can be tuned independently of the base threshold (Gerry:
+      "a 10 min grace period on comms beyond the 30 min no contact").
+    - **`missing`** (hard — "an alert flashing red"): CAPR 70-10's actual
+      compound trigger — overdue past ETA by the threshold **and** no
+      contact for that same threshold, both reusing
+      `overdue_threshold_minutes`/default 60, not two separate numbers
+      (Gerry: "overdue... by an hour AND has not been communicated with for
+      an hour"). Verified live with real backdated sorties: a 45-min-silent/
+      not-yet-overdue sortie correctly showed `no_contact_warning` only; a
+      70-min-silent/70-min-overdue sortie correctly showed `missing` (with
+      `no_contact_warning` also true, as expected, since `missing` requires
+      a strictly longer silence than the soft trigger).
+    - **Visual**: `no-contact-warning` rows get a slow (2.4s) pulsing orange
+      inset-box-shadow halo on their cells (`ops-board-halo-orange`
+      keyframe); `missing` rows get a hard on/off (0.9s, `steps(2,start)`)
+      red background flash (`ops-board-flash-red`) — deliberately different
+      animation *character*, not just color, so the two severities read as
+      distinct at a glance, not just "more of the same alarm." Applied to
+      the `<td>` elements, not the bare `<tr>` — box-shadow/background
+      animation on a table row itself isn't reliably rendered cross-browser.
+      Text badges ("NO CONTACT 45m" / "MISSING — NOTIFY NOC") carry the same
+      information for accessibility/screenshots, not color alone.
+    - Sort priority on the board: `missing` > `no_contact_warning` >
+      `overdue` > ordinary state ranking — a missing aircraft always sorts
+      to the top regardless of its airborne/ground/etc. state.
   - **State naming**: reuses the sidebar's existing `airborne`/`ground`/
     `"not-reporting"` convention exactly (plus `complete`) rather than
     inventing a second naming scheme for the same concept — caught and fixed
@@ -684,6 +723,33 @@ follow the NIMS taskbook."
     wants both shown, and since EWMC's station-plot pattern is earmarked for
     Flight Category, Flight Impacts needs a *different* visual encoding on
     AvTrack's airfield layer — **not yet designed, open item below**.
+
+- **CAPR 70-10 (DRAFT) confirmed real and read directly, 2026-10-14** —
+  `~/CAP/CAPR 70-10 Complete.pdf`, found after Gerry pointed to
+  `~/CAP/Regulations` (actually empty; the file was directly under `~/CAP/`).
+  States "Supersedes: CAPR 70-1, 31 MAR 2020" in its own header — Gerry
+  was right all along that 70-10 was coming and would supersede 70-1; every
+  earlier correction this session was accurate for the then-current live
+  WxCOP code, not a refutation of what Gerry was tracking. Note for future
+  precision: CAPF 70-1 ("Pre-Flight Risk Assessment Worksheet," a form)
+  is a different thing from the now-superseded CAPR 70-1 (the
+  regulation) — easy to conflate, kept distinct in this doc going forward.
+  Key content, not yet acted on beyond the overdue-threshold change above:
+  - §10.11.4.2 — who may release a flight, by ORM score (a Risk Assessment
+    Worksheet produces a numeric score): FRO 0-14, SFRO 15-29, SFRO + Wing
+    CC/CD/DO concurrence 30-59, CAP/DO or designee via NOC greater than 60.
+  - §10.11.4.7 — IFR release weather thresholds, separate from the ORM
+    score: any FRO may approve >= 800ft ceiling AND >= 2SM visibility (or
+    approach minimums, whichever higher); SFRO required for < 800-2 but
+    >= 500-1; SFRO + Wing CC/CD/DO concurrence required down to FAA minimums.
+    Candidate source for Flight Impacts' actual Go/Caution/No-Go
+    breakpoints once that feature is built, in place of whatever WxCOP's
+    current CAPR-70-1-era Stoplight logic uses — not yet compared against
+    `ingest_glmp_impacts.py`'s existing thresholds, worth checking before
+    building the airfield-coloring feature.
+  - §10.11.4.6 — runway-length vs. TOLD: any FRO may approve when
+    departure runway >= calculated takeoff+landing ground roll; SFRO
+    required when shorter.
 
 - **Explicitly not yet built** (scoped, not forgotten):
   - Weather overlay on the map itself (Flight Category station plots +

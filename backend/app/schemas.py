@@ -219,7 +219,12 @@ class OpsBoardRow(BaseModel):
     last_ops_normal_utc: datetime | None
     overdue: bool
     overdue_minutes: int | None
-    state: str  # airborne / on_ground / not_reporting / complete
+    # Two independent alert conditions (REQUIREMENTS.md 3.3, added 2026-10-14) --
+    # see ops_board.py's module docstring for why these are separate from `overdue`.
+    last_contact_minutes: int | None
+    no_contact_warning: bool  # soft: no contact in 30+10min, independent of ETA
+    missing: bool  # hard: overdue AND no contact, both past the same threshold
+    state: str  # airborne / ground / not-reporting / complete
 
 
 class OpsBoardOut(BaseModel):

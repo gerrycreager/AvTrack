@@ -119,9 +119,26 @@
       letter-spacing: 0.04em; padding: 4px 8px; border-bottom: 1px solid #3a4048; }
     #ops-board-table td { padding: 5px 8px; border-bottom: 1px solid #262b31; cursor: pointer; }
     #ops-board-table tr:hover td { background: #262b31; }
-    #ops-board-table tr.overdue td { background: #4a1a1a; }
-    #ops-board-table tr.overdue:hover td { background: #5a2222; }
     #ops-board-table .overdue-flag { color: #ff6b6b; font-weight: 700; }
+    /* Two independent alert states (REQUIREMENTS.md 3.3, added 2026-10-14) --
+       applied to the <td>s, not the <tr>, since box-shadow/background animation on
+       a bare <tr> isn't reliably rendered across browsers for table layout.
+       `no-contact-warning` is deliberately a slow, gentle pulse ("a slow flashing
+       reminder... orange halo" -- Gerry); `missing` is a hard on/off flash (CAPR
+       70-10's compound overdue+no-contact trigger -- "an alert flashing red"),
+       visually distinct so the two severities can't be confused at a glance. */
+    #ops-board-table tr.no-contact-warning td { animation: ops-board-halo-orange 2.4s ease-in-out infinite; }
+    #ops-board-table tr.missing td { animation: ops-board-flash-red 0.9s steps(2, start) infinite; }
+    #ops-board-table .no-contact-flag { color: #ffab40; font-weight: 700; }
+    #ops-board-table .missing-flag { color: #ff3b3b; font-weight: 700; }
+    @keyframes ops-board-halo-orange {
+      0%, 100% { box-shadow: inset 0 0 0 9999px rgba(255, 152, 0, 0); }
+      50% { box-shadow: inset 0 0 0 9999px rgba(255, 152, 0, 0.22); }
+    }
+    @keyframes ops-board-flash-red {
+      0%, 49% { background: #4a1a1a; }
+      50%, 100% { background: #7a1414; }
+    }
 
     /* Sortie panel */
     #sortie-panel {

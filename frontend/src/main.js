@@ -1065,12 +1065,15 @@ function renderOpsBoardTable(rows) {
     container.innerHTML = "<em>No sorties in the last 24 hours.</em>";
     return;
   }
-  // Overdue first (most-overdue-first), then airborne, then ground, then
-  // not-reporting, then complete -- same priority-sort idea as the sidebar's
-  // STATE_RANK, but overdue always wins regardless of state since that's the one
-  // thing an AOBD glancing at the board needs to see first.
+  // Two independent alert conditions (REQUIREMENTS.md 3.3, added 2026-10-14), most
+  // severe first: `missing` (CAPR 70-10's compound overdue+no-contact trigger,
+  // flashing red) outranks `no_contact_warning` (soft, orange halo, independent of
+  // ETA) outranks plain `overdue` (still shown as data, no longer itself an alarm --
+  // per Gerry, "that's a different issue") outranks the ordinary state ranking.
   const stateRank = { airborne: 0, ground: 1, "not-reporting": 2, complete: 3 };
   const sorted = [...rows].sort((a, b) => {
+    if (a.missing !== b.missing) return a.missing ? -1 : 1;
+    if (a.no_contact_warning !== b.no_contact_warning) return a.no_contact_warning ? -1 : 1;
     if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
     if (a.overdue && b.overdue) return b.overdue_minutes - a.overdue_minutes;
     return stateRank[a.state] - stateRank[b.state];
@@ -1093,8 +1096,19 @@ function renderOpsBoardTable(rows) {
   const bodyHtml = sorted
     .map((r) => {
       const overdueFlag = r.overdue ? `<span class="overdue-flag">OVERDUE +${r.overdue_minutes}m</span>` : "";
+      const alertFlag = r.missing
+        ? `<span class="missing-flag">MISSING — NOTIFY NOC</span>`
+        : r.no_contact_warning
+          ? `<span class="no-contact-flag">NO CONTACT ${r.last_contact_minutes}m</span>`
+          : "";
+      // Row-level class drives the visual (flashing red halo / slow orange halo) --
+      // CSS in index.html. `missing` and `no-contact-warning` are mutually
+      // exclusive by construction (missing requires no_contact_warning's condition
+      // to already be true at a longer duration), but keep both checks explicit
+      // rather than relying on that invariant holding forever.
+      const alertClass = r.missing ? "missing" : r.no_contact_warning ? "no-contact-warning" : "";
       return `
-        <tr class="${r.overdue ? "overdue" : ""}" data-tail="${r.tail_number}">
+        <tr class="${alertClass}" data-tail="${r.tail_number}">
           <td>${r.sortie_number ?? "—"}</td>
           <td>${r.callsign ?? r.tail_number}</td>
           <td>${r.aircraft_type ?? "—"}</td>
@@ -1104,7 +1118,7 @@ function renderOpsBoardTable(rows) {
           <td>${r.atd_utc ? fmtInTz(r.atd_utc) : "—"}</td>
           <td>${r.eta_utc ? fmtInTz(r.eta_utc) : "—"} ${overdueFlag}</td>
           <td>${r.ata_utc ? fmtInTz(r.ata_utc) : "—"}</td>
-          <td>${r.last_ops_normal_utc ? fmtInTz(r.last_ops_normal_utc) : "—"}</td>
+          <td>${r.last_ops_normal_utc ? fmtInTz(r.last_ops_normal_utc) : "—"} ${alertFlag}</td>
           <td><span class="status-badge status-${r.state}">${OPS_BOARD_STATE_LABEL[r.state]}</span></td>
         </tr>`;
     })
