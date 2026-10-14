@@ -596,7 +596,22 @@ follow the NIMS taskbook."
      workflow shape — **neither CAPR 70-1 nor the 70-10 draft specifies a
      status-board layout at all**, so this is still genuinely wing-local
      practice, labeled as such everywhere it's cited rather than presented
-     as a CAP-wide standard.
+     as a CAP-wide standard. Checked the next-most-authoritative source up
+     from wing-local directly, per Gerry — **NESA (National Emergency
+     Services Academy) is "deemed the national testbed for new processes
+     and procedures within the Mission Aircrew School,"** more authoritative
+     than a single wing's course though still not itself a regulation.
+     NESA's Mission Aircrew School page (`nesa.cap.gov/about/schools/mas`)
+     lists exactly one task guide — "Aircrew & Flightline," filename-dated
+     ~Apr 2005 — nothing AOBD/FRO/Air-Ops-Branch-specific. Per Gerry, this
+     gap is real and expected, not a sourcing miss: "NESA Task Guides are
+     somewhat older, as is 60-3(I), and will benefit from revision over
+     time." **This project's AOBD/OSC work is itself headed toward that
+     revision** — per Gerry, "what we're working on may be adopted
+     nationally, and that is the basis for the collaboration group
+     forming" — i.e. this isn't purely implementing an existing standard,
+     it may become/inform one, which is worth keeping in mind for how
+     carefully design rationale gets documented here.
   `CAPF 104` (Mission Flight Plan/Briefing Form — briefer must be
   AOBD-trainee-or-higher, requires a qualified FRO) is a national form.
   - **CAPR 70-1 (current, 31 MAR 2020 + ICL 25-03) read directly and
