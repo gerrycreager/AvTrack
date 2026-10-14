@@ -65,6 +65,32 @@ is reusable as the Phase 2 server's schema — not thrown away.
   app/adsb/adsb_lol.py, rather than inventing a new one) — sorted airborne
   first, then on-ground, then quiet. Unlisted/unexpected live traffic (not in
   the roster) still gets the existing red/⚠ treatment, unchanged.
+- **Unregistered CAP/PARD aircraft detection + one-click approve — shipped
+  2026-10-14**: per Gerry, "If an unregistered aircraft comes into the Area of
+  Operations, we need to know. We should be able to also register it with a
+  relatively simple click and approve process." Builds on the existing
+  `DiscoveredCallsign` candidate table (2026-09-15, see below) rather than
+  replacing it: `app/integrations/adsb_discovery.py` now matches both CAP- and
+  PARD-shaped callsigns (`^(CAP|PARD)\s?\d+$`, PARD added this date), shared by
+  two pollers — the existing slow 22-point CONUS sweep
+  (`scripts/discover_cap_callsigns.py`, re-enabled: confirmed disabled/inactive
+  on cosp1 at the start of this work despite being documented as running) and a
+  new fast in-process poller (`app/ingestion/ao_discovery_poller.py`, 60s
+  default) scoped to a newly-persisted **Area of Operations** (`OperationsArea`
+  table — the AO circle in 3.2 below was previously frontend-only; the existing
+  locate+radius control now also `PUT`s it to the backend, and a page reload
+  restores it via `GET`). `GET /api/discovered` lists non-dismissed candidates,
+  AO-filtered by haversine distance computed at read time (not stored, so it
+  never goes stale as the AO moves). The alert surfaces as a new top section of
+  the existing Air Ops Status Board (3.3 below), per Gerry's preference over a
+  separate panel — `POST /api/discovered/{id}/approve` creates the `Aircraft` (+
+  `AircraftCallsign`, labeled CAP/PARD) row with just tail+callsign, genuinely
+  one click, no form; `POST .../dismiss` marks it `dismissed_at` so a declined
+  candidate stops reappearing even as the pollers keep updating its
+  `last_seen_at`/`sample_count` on further sightings. Verified live: real
+  CONUS-sweep candidates correctly AO-filtered in/out as a candidate's position
+  was moved relative to the AO; approve/dismiss verified via curl and Playwright
+  (Ops Board panel) against isolated fake test tails, cleaned up afterward.
 - **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
   figure (datablock and side panel both), ATC-datablock-style. Computed in
   `app/ingestion/poller.py` from consecutive real position deltas (altitude change
@@ -110,9 +136,14 @@ is reusable as the Phase 2 server's schema — not thrown away.
 ### 3.2 Map & Geospatial
 - Zoom-to-area by ICAO airport ID, lat/lon, USNG (US National Grid), or MGRS, **with
   an adjustable radius** drawn as an operations-area circle around the point (added
-  2026-09-12 per a live-exercise request from KBAK/Columbus Muni). Not yet wired into
-  the "aircraft entering the operations area" highlighting logic (3.1) -- currently
-  visual only.
+  2026-09-12 per a live-exercise request from KBAK/Columbus Muni). **Backend-persisted
+  as of 2026-10-14** (`OperationsArea`, see 3.1's unregistered-aircraft-detection
+  entry above) so the AO-scoped discovery poller can geofence against it — the
+  locate+radius control now also `PUT`s the AO to the backend, not just drawing it.
+  Still not wired into the *already-tracked/registered* "aircraft entering the
+  operations area" highlighting logic — that remains a separate, unbuilt gap from
+  the unregistered-aircraft detection feature, which only concerns candidates not
+  yet in the roster.
 - **Airfield icons/labels — toggleable + tiered by zoom (shipped 2026-09-13, revised
   2026-09-14)**: a checkbox (`#labels-toggle`) turns airfield *text labels* on/off
   independent of tiering. Both the icon (dot) layer and the label layer are tiered

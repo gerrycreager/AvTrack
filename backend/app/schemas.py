@@ -234,3 +234,33 @@ class OpsBoardRow(BaseModel):
 class OpsBoardOut(BaseModel):
     generated_at: datetime
     rows: list[OpsBoardRow]
+
+
+class DiscoveredCallsignOut(BaseModel):
+    """One unregistered CAP/PARD-shaped candidate -- see app/api/discovered.py
+    and models.py's DiscoveredCallsign."""
+
+    id: UUID
+    tail_number: str
+    callsign: str
+    source_label: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+    sample_count: int
+    last_latitude: float | None
+    last_longitude: float | None
+
+    model_config = {"from_attributes": True}
+
+
+class OperationsAreaIn(BaseModel):
+    center_latitude: float
+    center_longitude: float
+    radius_nm: float
+
+
+class OperationsAreaOut(OperationsAreaIn):
+    id: UUID
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

@@ -1,17 +1,24 @@
-"""Passive CAP callsign/tail discovery from adsb.lol's live feed (REQUIREMENTS.md
-3.1, added 2026-09-15). Per Gerry: "we can also capture CAP callsigns and tail
-numbers from the live feed to populate the background list. Won't be exhaustive
-but it will get us more tails to work with. Let's start a multi-day capture."
+"""Passive CAP/PARD callsign/tail discovery from adsb.lol's live feed
+(REQUIREMENTS.md 3.1, added 2026-09-15, PARD matching added 2026-10-14). Per
+Gerry: "we can also capture CAP callsigns and tail numbers from the live feed to
+populate the background list. Won't be exhaustive but it will get us more tails
+to work with. Let's start a multi-day capture."
 
 This is a long-running service (systemd unit, deploy/avtrack-cap-discovery.service),
 not a one-shot script -- it loops forever, sweeping a fixed grid of CONUS points via
 adsb.lol's `/v2/point/{lat}/{lon}/{radius}` (up to 250nm radius; no wildcard/prefix
 callsign search exists on this API -- confirmed live 2026-09-14, `/v2/callsign/CAP`
 returns zero results, it's exact-match only), one point per cycle, filtering results
-client-side for a CAP-shaped `flight` field (`^CAP\\s?\\d+$`, tolerating the same
-"CAP 1234" vs "CAP1234" inconsistency seen in real WIMRS exports). Matches upsert
-into `discovered_callsigns` -- a candidate list, NOT auto-promoted into `Aircraft`
-(see that model's docstring for why).
+client-side for a CAP- or PARD-shaped `flight` field (`^(CAP|PARD)\\s?\\d+$`,
+tolerating the same "CAP 1234" vs "CAP1234" inconsistency seen in real WIMRS
+exports). Matches upsert into `discovered_callsigns` -- a candidate list, NOT
+auto-promoted into `Aircraft` (see that model's docstring for why).
+
+The regex/HTTP-fetch/upsert logic lives in app/integrations/adsb_discovery.py,
+shared with app/ingestion/ao_discovery_poller.py (the fast, AO-scoped in-process
+poller added alongside this script 2026-10-14) so the two can't drift apart.
+This script remains the slow, wide-area background net; the AO-scoped poller is
+the near-real-time one.
 
 Pacing: one point query per cycle, comfortably spaced (default 90s) -- adsb.lol's
 undocumented rate limit is aggressive (app/adsb/adsb_lol.py found it triggering
@@ -31,24 +38,16 @@ Usage (normally started via systemd, not run directly):
 
 import asyncio
 import logging
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 
-import httpx  # noqa: E402
-from sqlalchemy import func, select  # noqa: E402
-from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
-
-from app.db import SessionLocal  # noqa: E402
-from app.models import Aircraft, DiscoveredCallsign  # noqa: E402
+from app.integrations.adsb_discovery import extract_matches, fetch_point, new_client, upsert_matches  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("discover_cap_callsigns")
 
-ADSB_LOL_BASE_URL = "https://api.adsb.lol"
-CAP_CALLSIGN_RE = re.compile(r"^CAP\s?\d+$", re.IGNORECASE)
 POLL_INTERVAL_SECONDS = 90
 RADIUS_NM = 250
 
@@ -80,80 +79,20 @@ GRID_POINTS = [
 ]
 
 
-async def _fetch_point(client: httpx.AsyncClient, lat: float, lon: float) -> list[dict]:
-    try:
-        resp = await client.get(f"/v2/point/{lat}/{lon}/{RADIUS_NM}")
-        resp.raise_for_status()
-    except Exception:
-        logger.warning("adsb.lol point query failed for (%s, %s)", lat, lon, exc_info=True)
-        return []
-    return resp.json().get("ac") or []
-
-
-async def _upsert_matches(matches: list[dict]) -> int:
-    if not matches:
-        return 0
-    async with SessionLocal() as session:
-        known_tails = set((await session.execute(select(Aircraft.tail_number))).scalars())
-        new_count = 0
-        for m in matches:
-            tail = m["tail"]
-            if tail in known_tails:
-                continue  # already a real Aircraft row -- nothing to discover
-            stmt = (
-                pg_insert(DiscoveredCallsign)
-                .values(
-                    tail_number=tail,
-                    callsign=m["callsign"],
-                    last_latitude=m["lat"],
-                    last_longitude=m["lon"],
-                )
-                .on_conflict_do_update(
-                    constraint="uq_discovered_tail_callsign",
-                    set_={
-                        "last_seen_at": func.now(),
-                        "sample_count": DiscoveredCallsign.sample_count + 1,
-                        "last_latitude": m["lat"],
-                        "last_longitude": m["lon"],
-                    },
-                )
-            )
-            await session.execute(stmt)
-            new_count += 1
-        await session.commit()
-    return new_count
-
-
-def _extract_cap_matches(aircraft_list: list[dict]) -> list[dict]:
-    matches = []
-    for ac in aircraft_list:
-        flight = (ac.get("flight") or "").strip()
-        reg = (ac.get("r") or "").strip().upper()
-        if not flight or not reg:
-            continue
-        if CAP_CALLSIGN_RE.match(flight):
-            matches.append({"tail": reg, "callsign": flight.upper(), "lat": ac.get("lat"), "lon": ac.get("lon")})
-    return matches
-
-
 async def run_forever() -> None:
-    logger.info("Starting CAP callsign discovery: %d grid points, %ds between queries", len(GRID_POINTS), POLL_INTERVAL_SECONDS)
+    logger.info("Starting CAP/PARD callsign discovery: %d grid points, %ds between queries", len(GRID_POINTS), POLL_INTERVAL_SECONDS)
     grid_index = 0
-    async with httpx.AsyncClient(
-        base_url=ADSB_LOL_BASE_URL,
-        timeout=10.0,
-        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
-    ) as client:
+    async with new_client() as client:
         while True:
             lat, lon = GRID_POINTS[grid_index]
             grid_index = (grid_index + 1) % len(GRID_POINTS)
 
-            aircraft_list = await _fetch_point(client, lat, lon)
-            matches = _extract_cap_matches(aircraft_list)
+            aircraft_list = await fetch_point(client, lat, lon, RADIUS_NM)
+            matches = extract_matches(aircraft_list)
             if matches:
-                new_count = await _upsert_matches(matches)
+                new_count = await upsert_matches(matches)
                 logger.info(
-                    "(%s, %s): %d CAP-shaped callsign(s) seen, %d not already known: %s",
+                    "(%s, %s): %d CAP/PARD-shaped callsign(s) seen, %d not already known: %s",
                     lat,
                     lon,
                     len(matches),

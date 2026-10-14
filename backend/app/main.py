@@ -7,9 +7,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.adsb.adsb_lol import AdsbLolProvider
 from app.adsb.flightaware import FlightAwareProvider
-from app.api import aircraft, airfields, airspace, events, gis, locate, ops_board, reports, sorties, swim, weather, ws
+from app.api import aircraft, airfields, airspace, discovered, events, gis, locate, ops_board, reports, sorties, swim, weather, ws
 from app.config import settings
 from app.db import init_db
+from app.ingestion.ao_discovery_poller import run_ao_discovery_loop
 from app.ingestion.poller import run_poll_loop
 
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +35,7 @@ async def no_cache_for_frontend(request, call_next):
 app.include_router(aircraft.router)
 app.include_router(airfields.router)
 app.include_router(airspace.router)
+app.include_router(discovered.router)
 app.include_router(events.router)
 app.include_router(gis.router)
 app.include_router(locate.router)
@@ -76,6 +78,15 @@ async def on_startup():
         )
     else:
         logger.warning("ADSBLOL_POLLING_ENABLED=false -- adsb.lol polling paused.")
+
+    # Fast, AO-scoped CAP/PARD discovery (REQUIREMENTS.md 3.1) -- independent of
+    # the above pollers, which only ever track already-registered tails.
+    if settings.ao_discovery_polling_enabled:
+        app.state.poll_tasks.append(
+            asyncio.create_task(run_ao_discovery_loop(interval_seconds=settings.ao_discovery_poll_interval_seconds))
+        )
+    else:
+        logger.warning("AO_DISCOVERY_POLLING_ENABLED=false -- AO-scoped discovery polling paused.")
 
 
 @app.on_event("shutdown")

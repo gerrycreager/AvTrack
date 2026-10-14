@@ -59,6 +59,20 @@ class Settings(BaseSettings):
     wxcop_base_url: str = "http://192.168.0.200"
     wxcop_host_header: str = "wxcop.duckdns.org"
     wxcop_enabled: bool = True
+    # Fast, AO-scoped CAP/PARD callsign discovery (REQUIREMENTS.md 3.1, added
+    # 2026-10-14) -- separate cadence from both the tracked-tail pollers above
+    # (different call shape: adsb.lol point-radius, not bulk /v2/reg/) and the
+    # slow 22-point CONUS discovery sweep (scripts/discover_cap_callsigns.py,
+    # 90s/point) -- this queries only the current Area of Operations, every
+    # cycle, for near-real-time "unregistered aircraft entered the AO" alerting
+    # on the Ops Board. Same kill-switch convention as adsb_polling_enabled.
+    # 60s: faster than the slow net's 90s/point pace (this is the near-real-time
+    # path and makes the same one-call-per-cycle as that net), but not so
+    # aggressive it risks adsb.lol's known rate limit now that two independent
+    # callers hit the same point-radius endpoint family -- a starting number to
+    # tune once real 429 behavior with both pollers running is observed.
+    ao_discovery_polling_enabled: bool = True
+    ao_discovery_poll_interval_seconds: int = 60
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:

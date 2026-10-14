@@ -647,6 +647,20 @@ async function loadKnownAircraft() {
   }
 }
 
+// Restores the persisted Area of Operations on page load (REQUIREMENTS.md 3.1,
+// added 2026-10-14) so a refresh doesn't visually lose the AO the backend still
+// has -- the AO is otherwise only (re-)drawn from a fresh locate() call.
+async function loadPersistedOpsArea() {
+  try {
+    const res = await fetch("/api/discovered/ao");
+    if (!res.ok) return;
+    const ao = await res.json();
+    if (ao) setOpsArea([ao.center_longitude, ao.center_latitude], ao.radius_nm);
+  } catch (err) {
+    console.error("Failed to load persisted Area of Operations", err);
+  }
+}
+
 function markerColor(tail) {
   return knownAircraft.has(tail) ? "#2b6cb0" : "#d9534f"; // red = unlisted, per REQUIREMENTS.md 3.1
 }
@@ -1371,14 +1385,55 @@ const OPS_BOARD_STATE_LABEL = {
 
 async function refreshOpsBoard() {
   try {
-    const res = await fetch("/api/ops-board?hours=24");
-    const { rows, generated_at } = await res.json();
+    const [boardRes, discoveredRes] = await Promise.all([fetch("/api/ops-board?hours=24"), fetch("/api/discovered")]);
+    const { rows, generated_at } = await boardRes.json();
+    renderDiscoveredSection(discoveredRes.ok ? await discoveredRes.json() : []);
     renderOpsBoardTable(rows);
     document.getElementById("ops-board-updated").textContent = `Updated ${fmtInTz(generated_at)}`;
   } catch (err) {
     document.getElementById("ops-board-table").innerHTML = "<em>Failed to load ops board.</em>";
     console.error(err);
   }
+}
+
+// Unregistered CAP/PARD aircraft detected in the AO (REQUIREMENTS.md 3.1, added
+// 2026-10-14) -- folded into the Ops Board as its own top section per Gerry's
+// preference, rather than a separate panel/toast, reusing the board's existing
+// poll cadence and the `.missing-flag` visual language instead of inventing new
+// styling.
+function renderDiscoveredSection(rows) {
+  const el = document.getElementById("discovered-section");
+  if (!rows.length) {
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = `
+    <div class="discovered-alert">
+      <strong class="missing-flag">${rows.length} unregistered CAP/PARD aircraft in AO</strong>
+      ${rows
+        .map(
+          (r) => `
+        <div class="discovered-row">
+          <span>${r.source_label} ${r.callsign} / ${r.tail_number}</span>
+          <button class="discovered-approve" data-id="${r.id}">Approve</button>
+          <button class="discovered-dismiss" data-id="${r.id}">Dismiss</button>
+        </div>`
+        )
+        .join("")}
+    </div>`;
+  el.querySelectorAll(".discovered-approve").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      await fetch(`/api/discovered/${btn.dataset.id}/approve`, { method: "POST" });
+      await loadKnownAircraft();
+      refreshOpsBoard();
+    })
+  );
+  el.querySelectorAll(".discovered-dismiss").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      await fetch(`/api/discovered/${btn.dataset.id}/dismiss`, { method: "POST" });
+      refreshOpsBoard();
+    })
+  );
 }
 
 function renderOpsBoardTable(rows) {
@@ -1527,6 +1582,14 @@ async function locate(query) {
   const radiusNm = parseFloat(document.getElementById("locate-radius").value) || 0;
   if (radiusNm > 0) {
     setOpsArea([longitude, latitude], radiusNm);
+    // Persist to the backend (REQUIREMENTS.md 3.1, added 2026-10-14) so the
+    // AO-scoped discovery poller can geofence against it -- additive, doesn't
+    // change the draw-only behavior above.
+    fetch("/api/discovered/ao", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ center_latitude: latitude, center_longitude: longitude, radius_nm: radiusNm }),
+    }).catch((err) => console.error("Failed to persist Area of Operations:", err));
   }
   if (bounds) {
     setMgrsBox(bounds);
@@ -1805,3 +1868,4 @@ map.on("load", refreshSua);
 map.on("moveend", scheduleSuaRefresh);
 map.on("load", refreshGisLayerList);
 loadKnownAircraft().then(connectWebSocket);
+loadPersistedOpsArea();

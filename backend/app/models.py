@@ -391,27 +391,71 @@ class GisFeature(Base):
 
 
 class DiscoveredCallsign(Base):
-    """A tail/callsign pair seen live on adsb.lol with a CAP-shaped callsign, not
-    already in `Aircraft` (REQUIREMENTS.md 3.1, added 2026-09-15) -- see
-    scripts/discover_cap_callsigns.py. Per Gerry: "we can also capture CAP
-    callsigns and tail numbers from the live feed to populate the background
-    list... won't be exhaustive but it will get us more tails to work with."
+    """A tail/callsign pair seen live on adsb.lol with a CAP- or PARD-shaped
+    callsign, not already in `Aircraft` (REQUIREMENTS.md 3.1, added 2026-09-15,
+    PARD + AO-scoping added 2026-10-14) -- see scripts/discover_cap_callsigns.py
+    (slow 22-point CONUS sweep) and app/ingestion/ao_discovery_poller.py (fast
+    poller scoped to the live OperationsArea, for near-real-time "an unregistered
+    aircraft entered the AO" alerting on the Ops Board). Per Gerry: "we can also
+    capture CAP callsigns and tail numbers from the live feed to populate the
+    background list... won't be exhaustive but it will get us more tails to work
+    with." / "If an unregistered aircraft comes into the Area of Operations, we
+    need to know."
 
     This is a *candidate* list, not auto-promoted into Aircraft -- a real tail
-    matching `^CAP\\d+$` almost always is CAP, but false positives are possible
-    (any operator can squawk anything) and Aircraft is the audited source of
-    truth other features key off of (roster upload, sortie tracking), so
-    promotion is a deliberate separate step, not automatic."""
+    matching the CAP/PARD shape almost always is one, but false positives are
+    possible (any operator can squawk anything) and Aircraft is the audited
+    source of truth other features key off of (roster upload, sortie tracking),
+    so promotion (`app/api/discovered.py`'s approve endpoint) is a deliberate
+    separate step, not automatic.
+
+    AO membership is NOT stored here -- it's computed at read time in
+    app/api/discovered.py from (last_latitude, last_longitude) against the
+    current OperationsArea, since storing it would go stale the moment the AO
+    moves. `dismissed_at` survives re-sightings (the pollers' upsert never clears
+    it), so a declined candidate stays off the alert list even as it keeps
+    accumulating sample_count."""
 
     __tablename__ = "discovered_callsigns"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     tail_number: Mapped[str] = mapped_column(String(10), index=True)
     callsign: Mapped[str] = mapped_column(String(20))
+    # Which regex alternative matched -- "CAP" or "PARD" (default "CAP" for rows
+    # that predate this column). Drives the approve endpoint's AircraftCallsign.label
+    # and the Ops Board badge text.
+    source_label: Mapped[str] = mapped_column(String(10), default="CAP")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sample_count: Mapped[int] = mapped_column(default=1)
     last_latitude: Mapped[float | None] = mapped_column(Float)
     last_longitude: Mapped[float | None] = mapped_column(Float)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (UniqueConstraint("tail_number", "callsign", name="uq_discovered_tail_callsign"),)
+
+
+class OperationsArea(Base):
+    """The single active Area of Operations (AO) -- REQUIREMENTS.md 3.1/3.2's
+    AO/AOI concept, promoted 2026-10-14 from pure-frontend (frontend/src/main.js's
+    setOpsArea(), driven only by the locate+radius control) to a real backend
+    concept so app/ingestion/ao_discovery_poller.py can geofence the fast
+    discovery poll against it, and app/api/discovered.py can filter candidates by
+    it. Single row by design (the API layer upserts the one row rather than ever
+    inserting a second) -- not a per-mission table yet, matching the existing
+    locate+radius control's one-at-a-time semantics; a future per-mission AO is a
+    separate enhancement, not scoped here.
+
+    Plain lat/lon/radius floats, not a PostGIS Geometry -- the only consumer is a
+    point-radius membership check (haversine, see
+    app/integrations/adsb_discovery.py), and every other AO-shaped thing in this
+    codebase (circleGeoJSON()) already treats it as center+radius, not a stored
+    polygon."""
+
+    __tablename__ = "operations_area"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    center_latitude: Mapped[float] = mapped_column(Float)
+    center_longitude: Mapped[float] = mapped_column(Float)
+    radius_nm: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
