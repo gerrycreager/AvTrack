@@ -65,6 +65,10 @@ def extract_matches(aircraft_list: list[dict]) -> list[dict]:
             continue
         m = CALLSIGN_RE.match(flight)
         if m:
+            # alt_baro is either a number of feet or the literal string "ground"
+            # (same quirk handled in app/adsb/adsb_lol.py) -- normalized here since
+            # this feeds a plain Float column, not passed through as Any.
+            alt_baro = ac.get("alt_baro")
             matches.append(
                 {
                     "tail": reg,
@@ -72,6 +76,8 @@ def extract_matches(aircraft_list: list[dict]) -> list[dict]:
                     "lat": ac.get("lat"),
                     "lon": ac.get("lon"),
                     "source_label": m.group(1).upper(),
+                    "altitude_ft": 0.0 if alt_baro == "ground" else alt_baro,
+                    "ground_speed_kt": ac.get("gs"),
                 }
             )
     return matches
@@ -99,6 +105,8 @@ async def upsert_matches(matches: list[dict]) -> int:
                     source_label=m["source_label"],
                     last_latitude=m["lat"],
                     last_longitude=m["lon"],
+                    last_altitude_ft=m["altitude_ft"],
+                    last_ground_speed_kt=m["ground_speed_kt"],
                 )
                 .on_conflict_do_update(
                     constraint="uq_discovered_tail_callsign",
@@ -107,6 +115,8 @@ async def upsert_matches(matches: list[dict]) -> int:
                         "sample_count": DiscoveredCallsign.sample_count + 1,
                         "last_latitude": m["lat"],
                         "last_longitude": m["lon"],
+                        "last_altitude_ft": m["altitude_ft"],
+                        "last_ground_speed_kt": m["ground_speed_kt"],
                     },
                 )
             )

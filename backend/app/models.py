@@ -430,6 +430,12 @@ class DiscoveredCallsign(Base):
     sample_count: Mapped[int] = mapped_column(default=1)
     last_latitude: Mapped[float | None] = mapped_column(Float)
     last_longitude: Mapped[float | None] = mapped_column(Float)
+    # Added 2026-10-15 so the map's candidate datablock can show airspeed/altitude
+    # instead of the tail number (per Gerry) -- same "ground" alt_baro quirk as
+    # app/adsb/adsb_lol.py, normalized to 0.0 before storage here (not left as a
+    # string) since this column is plain Float, not Any.
+    last_altitude_ft: Mapped[float | None] = mapped_column(Float)
+    last_ground_speed_kt: Mapped[float | None] = mapped_column(Float)
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (UniqueConstraint("tail_number", "callsign", name="uq_discovered_tail_callsign"),)

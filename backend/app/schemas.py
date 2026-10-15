@@ -249,6 +249,8 @@ class DiscoveredCallsignOut(BaseModel):
     sample_count: int
     last_latitude: float | None
     last_longitude: float | None
+    last_altitude_ft: float | None
+    last_ground_speed_kt: float | None
 
     model_config = {"from_attributes": True}
 

@@ -116,6 +116,7 @@ window.openSortiePanel = openSortiePanel; // same -- lets devtools/tests open th
 let mapStyleReady = false;
 map.on("load", () => {
   mapStyleReady = true;
+  registerAirfieldTierBadges();
 });
 
 document.getElementById("basemap-select").addEventListener("change", (e) => {
@@ -168,7 +169,60 @@ const TIER_MIN_ZOOM = { 1: 0, 2: 0, 3: 7, 4: 12, 5: 14 };
 // whichever dot-coloring mode (Flight Impacts/Station Plot) is selected -- exactly
 // the "not a radio button selection" part of the ask.
 const AIRFIELD_TIER_TEXT_COLORS = { 1: "#ffffff", 2: "#ffffff", 3: "#111111", 4: "#111111", 5: "#333333" };
-const AIRFIELD_TIER_HALO_COLORS = { 1: "#c81e1e", 2: "#1950c8", 3: "#c8c8c8", 4: "#5a9a5a", 5: "#9a9ad2" };
+
+// EWMC-style boxed labels (redesign, 2026-10-15) -- the text-color/halo approximation
+// above wasn't enough per Gerry: "look at how EWMC displays labels (in a box with a
+// tier-related background)... What we've got for labels might work but isn't currently
+// looking good." MapLibre's symbol-layer text has no native CSS-style background-box
+// property; the actual native mechanism for this is icon-image + icon-text-fit:"both"
+// -- register a small raster icon per tier via map.addImage() (see
+// registerAirfieldTierBadges below) and let GL stretch it to the text's own bbox.
+// Fill colors ported directly from EWMC's .apt-t1..apt-t5 pill classes
+// (enhanced_weather_map_complete.html on r815); borders are EWMC's border colors for
+// the same classes, since halo alone couldn't show a true border.
+const AIRFIELD_TIER_BADGE_FILL = {
+  1: "rgba(200,30,30,0.93)",
+  2: "rgba(25,80,200,0.93)",
+  3: "rgba(220,220,220,0.93)",
+  4: "rgba(150,200,150,0.90)",
+  5: "rgba(200,200,255,0.88)",
+};
+const AIRFIELD_TIER_BADGE_BORDER = { 1: "#800000", 2: "#003a99", 3: "#888888", 4: "#669966", 5: "#9999aa" };
+
+function makeTierBadgeImage(fill, border) {
+  const w = 32,
+    h = 20,
+    r = 7;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.arcTo(w, 0, w, h, r);
+  ctx.arcTo(w, h, 0, h, r);
+  ctx.arcTo(0, h, 0, 0, r);
+  ctx.arcTo(0, 0, w, 0, r);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = border;
+  ctx.stroke();
+  return ctx.getImageData(0, 0, w, h);
+}
+
+// Must run before airfields-label is created (map.on("load", refreshAirfields) below)
+// so icon-image's match expression always resolves against already-registered images --
+// registered in the same "load" handler as mapStyleReady, which fires first.
+function registerAirfieldTierBadges() {
+  for (const tier of [1, 2, 3, 4, 5]) {
+    const id = `airfield-tier-badge-${tier}`;
+    if (!map.hasImage(id)) {
+      map.addImage(id, makeTierBadgeImage(AIRFIELD_TIER_BADGE_FILL[tier], AIRFIELD_TIER_BADGE_BORDER[tier]));
+    }
+  }
+}
 
 let labelsVisible = true;
 let airfieldsFetchTimer = null;
@@ -243,7 +297,7 @@ async function refreshAirfields() {
           // lowest zoom) was barely visible at the map's own 3.2 startup zoom.
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 3, 4, 6, 5, 10, 7, 14, 10],
           // Neutral as of 2026-10-15 -- mil/civ moved to the LABEL's tier coloring
-          // below (see AIRFIELD_TIER_TEXT_COLORS/AIRFIELD_TIER_HALO_COLORS), per
+          // below (see AIRFIELD_TIER_TEXT_COLORS/AIRFIELD_TIER_BADGE_FILL), per
           // Gerry's "not a radio button selection" direction. This is also what
           // setAirfieldDisplayMode("tier") resets it to.
           "circle-color": "#5b6b7a",
@@ -261,11 +315,26 @@ async function refreshAirfields() {
           "text-size": 11,
           "text-offset": [0, 1.1],
           "text-anchor": "top",
+          // EWMC-style boxed background -- see registerAirfieldTierBadges above for why
+          // icon-image+icon-text-fit is the mechanism and how the icons were generated.
+          "icon-image": [
+            "match",
+            ["get", "tier"],
+            1,
+            "airfield-tier-badge-1",
+            2,
+            "airfield-tier-badge-2",
+            3,
+            "airfield-tier-badge-3",
+            4,
+            "airfield-tier-badge-4",
+            "airfield-tier-badge-5",
+          ],
+          "icon-text-fit": "both",
+          "icon-text-fit-padding": [3, 6, 3, 6],
         },
         paint: {
           "text-color": ["match", ["get", "tier"], 1, AIRFIELD_TIER_TEXT_COLORS[1], 2, AIRFIELD_TIER_TEXT_COLORS[2], 3, AIRFIELD_TIER_TEXT_COLORS[3], 4, AIRFIELD_TIER_TEXT_COLORS[4], AIRFIELD_TIER_TEXT_COLORS[5]],
-          "text-halo-color": ["match", ["get", "tier"], 1, AIRFIELD_TIER_HALO_COLORS[1], 2, AIRFIELD_TIER_HALO_COLORS[2], 3, AIRFIELD_TIER_HALO_COLORS[3], 4, AIRFIELD_TIER_HALO_COLORS[4], AIRFIELD_TIER_HALO_COLORS[5]],
-          "text-halo-width": 1.6,
         },
       });
       map.on("click", "airfields-layer", (e) => {
@@ -892,7 +961,13 @@ async function refreshDiscoveredMarkers() {
     } else {
       marker.setLngLat([r.last_longitude, r.last_latitude]);
     }
-    marker._datablock.innerHTML = `<div class="cs">${r.callsign}</div><div>${r.tail_number}</div>`;
+    // Altitude/speed, not tail number -- per Gerry: "the data labels doesn't need the
+    // tail number but does need airspeed and altitude" (2026-10-14). Same "—" placeholder
+    // convention as the known-aircraft datablock above for rows that predate the
+    // last_altitude_ft/last_ground_speed_kt columns or simply haven't had a fresh sighting yet.
+    const alt = r.last_altitude_ft != null ? Math.round(r.last_altitude_ft) : "—";
+    const gs = r.last_ground_speed_kt != null ? Math.round(r.last_ground_speed_kt) : "—";
+    marker._datablock.innerHTML = `<div class="cs">${r.callsign}</div><div>${alt}ft ${gs}kt</div>`;
   }
 }
 
