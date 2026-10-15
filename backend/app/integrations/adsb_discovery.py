@@ -78,6 +78,7 @@ def extract_matches(aircraft_list: list[dict]) -> list[dict]:
                     "source_label": m.group(1).upper(),
                     "altitude_ft": 0.0 if alt_baro == "ground" else alt_baro,
                     "ground_speed_kt": ac.get("gs"),
+                    "heading_deg": ac.get("track"),
                 }
             )
     return matches
@@ -107,6 +108,7 @@ async def upsert_matches(matches: list[dict]) -> int:
                     last_longitude=m["lon"],
                     last_altitude_ft=m["altitude_ft"],
                     last_ground_speed_kt=m["ground_speed_kt"],
+                    last_heading_deg=m["heading_deg"],
                 )
                 .on_conflict_do_update(
                     constraint="uq_discovered_tail_callsign",
@@ -117,6 +119,7 @@ async def upsert_matches(matches: list[dict]) -> int:
                         "last_longitude": m["lon"],
                         "last_altitude_ft": m["altitude_ft"],
                         "last_ground_speed_kt": m["ground_speed_kt"],
+                        "last_heading_deg": m["heading_deg"],
                     },
                 )
             )

@@ -950,11 +950,13 @@ async function refreshDiscoveredMarkers() {
       wrapper.appendChild(datablock);
       wrapper.addEventListener("click", (e) => {
         e.stopPropagation();
+        const ageMin = Math.round((Date.now() - new Date(r.last_seen_at).getTime()) / 60000);
         const popup = new maplibregl.Popup({ closeButton: true })
           .setLngLat(marker.getLngLat())
           .setHTML(
             `<div style="font-size:12px;"><strong>${r.source_label} ${r.callsign}</strong> / ${r.tail_number}<br/>
              Unregistered -- not part of any tracked operation<br/>
+             Last seen ${ageMin} min ago -- position/track may be stale, not live<br/>
              <button class="discovered-approve" data-id="${r.id}">Approve</button>
              <button class="discovered-dismiss" data-id="${r.id}">Dismiss</button></div>`
           )
@@ -971,10 +973,17 @@ async function refreshDiscoveredMarkers() {
       });
       marker = new maplibregl.Marker({ element: wrapper }).setLngLat([r.last_longitude, r.last_latitude]).addTo(map);
       marker._datablock = datablock;
+      marker._dot = dot;
+      marker._wrapper = wrapper;
       discoveredMarkers.set(r.id, marker);
     } else {
       marker.setLngLat([r.last_longitude, r.last_latitude]);
     }
+    // Direction of flight -- per Gerry: "the aircraft icon doesn't show what
+    // direction it's moving" (2026-10-15). Same rotate-the-whole-SVG convention as
+    // the known-aircraft marker above; falls back to unrotated (nose up) when
+    // adsb.lol didn't report a track, same as that marker's `?? 0`.
+    marker._dot.style.transform = `rotate(${r.last_heading_deg ?? 0}deg)`;
     // Altitude/speed, not tail number -- per Gerry: "the data labels doesn't need the
     // tail number but does need airspeed and altitude" (2026-10-14). Same "—" placeholder
     // convention as the known-aircraft datablock above for rows that predate the
@@ -982,6 +991,17 @@ async function refreshDiscoveredMarkers() {
     const alt = r.last_altitude_ft != null ? Math.round(r.last_altitude_ft) : "—";
     const gs = r.last_ground_speed_kt != null ? Math.round(r.last_ground_speed_kt) : "—";
     marker._datablock.innerHTML = `<div class="cs">${r.callsign}</div><div>${alt}ft ${gs}kt</div>`;
+    // Staleness fade -- found live 2026-10-15: widening DISCOVERED_STALE_MINUTES to
+    // 45 (see that constant's comment) fixed still-flying candidates flickering off
+    // the map between slow-sweep laps, but it also means a candidate that's actually
+    // landed/stopped broadcasting (confirmed live for CAP3226: 0 adsb.lol results,
+    // yet still inside the 45min window) now lingers at its last-known position for
+    // up to 45min looking exactly as "live" as a fresh sighting. Rather than guess a
+    // second cutoff, fade opacity continuously with age so the marker itself discloses
+    // its own trustworthiness -- full strength when fresh, visibly faded once stale
+    // enough to doubt, same spirit as the "Last seen Xm ago" popup line above.
+    const ageMin = (now - new Date(r.last_seen_at).getTime()) / 60000;
+    marker._wrapper.style.opacity = String(Math.max(0.35, 1 - ageMin / DISCOVERED_STALE_MINUTES));
   }
 }
 

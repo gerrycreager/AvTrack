@@ -436,6 +436,11 @@ class DiscoveredCallsign(Base):
     # string) since this column is plain Float, not Any.
     last_altitude_ft: Mapped[float | None] = mapped_column(Float)
     last_ground_speed_kt: Mapped[float | None] = mapped_column(Float)
+    # Added 2026-10-15 per Gerry: "the aircraft icon doesn't show what direction it's
+    # moving" -- true track over ground from adsb.lol's `track` field, same field/caveat
+    # as Position.heading_deg (app/adsb/adsb_lol.py: "not magnetic heading -- close
+    # enough here"). Drives the discovered-candidate marker's rotation on the frontend.
+    last_heading_deg: Mapped[float | None] = mapped_column(Float)
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (UniqueConstraint("tail_number", "callsign", name="uq_discovered_tail_callsign"),)

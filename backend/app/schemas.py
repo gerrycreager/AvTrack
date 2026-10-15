@@ -251,6 +251,7 @@ class DiscoveredCallsignOut(BaseModel):
     last_longitude: float | None
     last_altitude_ft: float | None
     last_ground_speed_kt: float | None
+    last_heading_deg: float | None
 
     model_config = {"from_attributes": True}
 

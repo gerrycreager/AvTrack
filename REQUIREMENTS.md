@@ -126,6 +126,50 @@ is reusable as the Phase 2 server's schema — not thrown away.
   `systemctl restart` after this change before new sightings actually carried
   altitude/speed; the in-process `avtrack-backend` poller picked the change up
   automatically on its own already-scheduled restart.
+  **Staleness-window bug, found and fixed 2026-10-15**: per Gerry, two real
+  aircraft he could see on ADS-B Exchange (CAP161, CAP2165) weren't showing
+  on AvTrack's map. Queried adsb.lol directly for both callsigns and
+  confirmed both were actively broadcasting at that moment (`seen: 0.0-0.3`
+  seconds) — ruling out an adsb.lol coverage gap like the CAP4634/CAP2717
+  case earlier the same day. Root cause: `DISCOVERED_STALE_MINUTES` (20) was
+  shorter than the slow 22-point CONUS sweep's full-lap time (22 × 90s =
+  33min under ideal conditions), so any candidate relying solely on that net
+  — i.e. outside the active AO, or with no AO set — was guaranteed to
+  flicker off the map for part of every cycle even while continuously
+  flying; CAP161 had in fact been sighted 36min earlier by the previous
+  (pre-restart) sweep process and simply hadn't been re-sighted yet. Fixed
+  by raising the constant to 45min, comfortably over one lap. Separately,
+  CAP2165 (Minneapolis) had never been sighted at all as of this report —
+  not a bug, just bad timing: `avtrack-cap-discovery` had been restarted
+  ~11min earlier (to pick up the altitude/speed columns above) and restarts
+  reset the sweep back to grid index 0, so the in-progress lap hadn't yet
+  reached the Minneapolis grid point again. Confirmed it appeared once that
+  point was swept.
+  **Follow-on: the wider window traded flicker for ghost markers — found and
+  fixed the same session.** Gerry immediately noticed the reverse case: CAP3226
+  showed on AvTrack but not on ADS-B Exchange. Direct adsb.lol query confirmed
+  it: 0 results, meaning it had actually landed/stopped broadcasting, but our
+  marker — built from a 38min-old sighting — was still well inside the new
+  45min staleness window and looked exactly as "live" as a fresh one. This is
+  the inherent cost of widening the window: a slow-sweep-only candidate can
+  never be *both* flicker-free *and* always current, since the system only
+  learns the truth once per lap. Rather than chase a second magic cutoff,
+  made the marker disclose its own trustworthiness instead: `discovered-marker`
+  opacity now fades continuously with age (`1 - ageMin/DISCOVERED_STALE_MINUTES`,
+  floored at 0.35) and the candidate's popup gained a "Last seen Xm ago --
+  position/track may be stale, not live" line, so a 40min-old marker reads as
+  visibly less certain than a 2min-old one instead of both looking identical.
+  **Direction of flight added in the same pass**: per Gerry, "the aircraft icon
+  doesn't show what direction it's moving" — candidate markers had never
+  captured heading at all. Added `DiscoveredCallsign.last_heading_deg` (adsb.lol's
+  `track` field, same "true track, not magnetic" caveat as `Position.heading_deg`
+  in `app/adsb/adsb_lol.py`; migration `c1881ce66ec8`) through the same shared
+  `adsb_discovery.py` capture path as altitude/speed, and rotate the marker's
+  SVG via the same `transform: rotate()` convention the known-aircraft marker
+  already uses. Verified the rotation renders correctly with a one-off synthetic
+  value on a live candidate row (staging data, not roster data, freely
+  correctable) rather than waiting out a full ~33min sweep lap for a real
+  heading to land naturally; the next real sighting overwrites it.
 - **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
   figure (datablock and side panel both), ATC-datablock-style. Computed in
   `app/ingestion/poller.py` from consecutive real position deltas (altitude change
