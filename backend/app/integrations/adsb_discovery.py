@@ -15,6 +15,7 @@ prefix word (confirmed with Gerry 2026-10-14): "PARD123", "PARD 123", etc.
 
 import logging
 import math
+from datetime import datetime, timezone
 
 import httpx
 import re
@@ -127,6 +128,80 @@ async def upsert_matches(matches: list[dict]) -> int:
             new_count += 1
         await session.commit()
     return new_count
+
+
+async def fetch_registrations(client: httpx.AsyncClient, tails: list[str]) -> list[dict]:
+    """Bulk /v2/reg/ lookup -- same one-call-per-cycle batching as
+    app/adsb/adsb_lol.py's registered-aircraft poller (that module's docstring has
+    the full rationale: per-tail calls hit adsb.lol's undocumented rate limit after
+    ~2 requests, batching into one comma-separated call per cycle sidesteps it)."""
+    if not tails:
+        return []
+    try:
+        resp = await client.get(f"/v2/reg/{','.join(tails)}")
+        resp.raise_for_status()
+    except Exception:
+        logger.warning("adsb.lol bulk reg lookup failed for %d tails", len(tails), exc_info=True)
+        return []
+    return resp.json().get("ac") or []
+
+
+async def refresh_known_candidates() -> int:
+    """Keeps already-discovered, not-yet-dismissed candidates' position/altitude/
+    speed/heading near-real-time via the same low-cost bulk /v2/reg/ lookup the
+    registered-aircraft poller already uses -- instead of waiting for the slow
+    22-point CONUS sweep to happen to revisit that tail's grid point (up to ~33min).
+
+    Found live 2026-10-15: Gerry saw CAP161 updating on ADS-B Exchange within 60sec
+    of real time, while AvTrack's own data for the same tail lagged by up to a full
+    sweep lap -- confirmed via a direct adsb.lol query that adsb.lol itself already
+    had the same sub-second-fresh data (`seen: 0.0`), so the bottleneck was purely
+    this app's own poll strategy, not data availability. The slow sweep (and the
+    AO-scoped poller) remain the only paths that discover a candidate nobody's seen
+    *at all* yet; once a tail is in discovered_callsigns, this keeps it fresh the
+    same way a registered tail already is.
+
+    Deliberately does NOT re-run the CAP/PARD regex or promote anything -- only
+    updates a row if the aircraft's current flight callsign still matches that row's
+    stored callsign exactly, so a tail that's since started squawking a different
+    callsign is left alone for the slow sweep to pick up as its own distinct
+    candidate row, same as today."""
+    async with SessionLocal() as session:
+        rows = (
+            (await session.execute(select(DiscoveredCallsign).where(DiscoveredCallsign.dismissed_at.is_(None))))
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return 0
+        tails = list({r.tail_number for r in rows})
+        async with new_client() as client:
+            aircraft_list = await fetch_registrations(client, tails)
+        by_tail = {}
+        for ac in aircraft_list:
+            reg = (ac.get("r") or "").strip().upper()
+            if reg:
+                by_tail[reg] = ac
+
+        updated = 0
+        for row in rows:
+            ac = by_tail.get(row.tail_number)
+            if ac is None:
+                continue
+            flight = (ac.get("flight") or "").strip().upper()
+            if flight != row.callsign.strip().upper():
+                continue
+            alt_baro = ac.get("alt_baro")
+            row.last_seen_at = datetime.now(timezone.utc)
+            row.sample_count += 1
+            row.last_latitude = ac.get("lat")
+            row.last_longitude = ac.get("lon")
+            row.last_altitude_ft = 0.0 if alt_baro == "ground" else alt_baro
+            row.last_ground_speed_kt = ac.get("gs")
+            row.last_heading_deg = ac.get("track")
+            updated += 1
+        await session.commit()
+    return updated
 
 
 def haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

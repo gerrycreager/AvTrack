@@ -11,6 +11,7 @@ from app.api import aircraft, airfields, airspace, discovered, events, gis, loca
 from app.config import settings
 from app.db import init_db
 from app.ingestion.ao_discovery_poller import run_ao_discovery_loop
+from app.ingestion.candidate_refresh_poller import run_candidate_refresh_loop
 from app.ingestion.poller import run_poll_loop
 
 logging.basicConfig(level=logging.INFO)
@@ -87,6 +88,19 @@ async def on_startup():
         )
     else:
         logger.warning("AO_DISCOVERY_POLLING_ENABLED=false -- AO-scoped discovery polling paused.")
+
+    # Fast refresh for already-discovered candidates (REQUIREMENTS.md 3.1) -- keeps
+    # a known candidate's position near-real-time via the same bulk /v2/reg/ shape as
+    # the registered-tail pollers above, instead of leaving it to the slow sweep's
+    # lap. See app.ingestion.candidate_refresh_poller's docstring.
+    if settings.candidate_refresh_polling_enabled:
+        app.state.poll_tasks.append(
+            asyncio.create_task(
+                run_candidate_refresh_loop(interval_seconds=settings.candidate_refresh_poll_interval_seconds)
+            )
+        )
+    else:
+        logger.warning("CANDIDATE_REFRESH_POLLING_ENABLED=false -- candidate refresh polling paused.")
 
 
 @app.on_event("shutdown")

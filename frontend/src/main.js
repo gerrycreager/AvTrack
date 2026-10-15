@@ -880,21 +880,26 @@ function airborneState(pos) {
 // candidate drops off the map once its last sighting goes stale, same
 // reasoning as sweepStaleAircraft above for registered aircraft.
 const discoveredMarkers = new Map(); // DiscoveredCallsign.id -> maplibregl.Marker
-// Bug found live 2026-10-15 (Gerry: two aircraft visible on ADS-B Exchange,
-// CAP161/CAP2165, weren't showing on our map -- confirmed via a direct adsb.lol
-// query that both were actively broadcasting at that moment, so this wasn't an
-// adsb.lol coverage gap like the CAP4634/CAP2717 case earlier the same day). The
-// previous value (20) had the reasoning backwards: it was meant to be "comfortably
-// under" the slow 22-point CONUS sweep's full-grid cycle, but a candidate seen only
-// by that slow net is re-sighted once per lap (22 points * 90s/point = 33min under
-// ideal conditions, more if any point hits adsb.lol's rate limit), so a 20min
-// staleness window guaranteed it would flicker off the map for ~13min of every
-// cycle even while continuously flying -- exactly what happened to both aircraft
-// here. Must be comfortably OVER one full lap instead, with margin for jitter/
-// backoff, not under it. A candidate inside the active AO stays fresh regardless
-// (the AO-scoped poller re-sights it every 60s -- see ao_discovery_poller.py), so
-// this constant only matters for the nationwide (no-AO or outside-AO) case.
-const DISCOVERED_STALE_MINUTES = 45;
+// History, 2026-10-15: originally 20, then briefly 45 after a bug was found live
+// (Gerry: CAP161/CAP2165 visible on ADS-B Exchange weren't showing on our map --
+// confirmed via adsb.lol directly that both were actively broadcasting, ruling out
+// a coverage gap). Root cause then was that a candidate seen only by the slow
+// 22-point CONUS sweep is re-sighted once per ~33min lap, so a 20min window
+// guaranteed it would flicker off the map for part of every cycle even while
+// flying. Raising it to 45 fixed the flicker but immediately traded it for the
+// opposite problem (Gerry, same session): CAP3226 kept showing on our map well
+// after it had actually landed, looking exactly as "live" as a fresh sighting, for
+// up to 45min. The real fix was the refresh cadence, not this number: every
+// already-discovered candidate is now kept near-real-time by a dedicated bulk
+// /v2/reg/ poller (app/ingestion/candidate_refresh_poller.py, 30s cadence -- same
+// mechanism the registered-aircraft poller already used) instead of waiting on the
+// slow sweep's lap, so a still-flying candidate is re-confirmed every ~30s and a
+// landed one simply stops updating. With that in place this only needs to be a
+// healthy margin over that 30s cadence, not a hedge against a 33min lap -- 5min is
+// ~10x the refresh interval, so a false "stale" during ordinary network jitter is
+// very unlikely, while a genuinely landed aircraft now goes stale in ~5min instead
+// of up to 45.
+const DISCOVERED_STALE_MINUTES = 5;
 const DISCOVERED_POLL_MS = 45000;
 
 function approveDiscovered(id) {

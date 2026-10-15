@@ -73,6 +73,16 @@ class Settings(BaseSettings):
     # tune once real 429 behavior with both pollers running is observed.
     ao_discovery_polling_enabled: bool = True
     ao_discovery_poll_interval_seconds: int = 60
+    # Fast refresh for already-discovered candidates (REQUIREMENTS.md 3.1, added
+    # 2026-10-15) -- see app.ingestion.candidate_refresh_poller's docstring for why
+    # this exists (found live: a known candidate's position lagged by up to a full
+    # slow-sweep lap even though adsb.lol itself had sub-second-fresh data for it).
+    # 30s matches the registered-aircraft poller's cadence (adsb_poll_interval_seconds
+    # default) since both use the identical one-bulk-call-per-cycle /v2/reg/ shape,
+    # already proven safe against adsb.lol's rate limit at that cadence/tail-count.
+    # Same kill-switch convention as adsb_polling_enabled.
+    candidate_refresh_polling_enabled: bool = True
+    candidate_refresh_poll_interval_seconds: int = 30
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:
