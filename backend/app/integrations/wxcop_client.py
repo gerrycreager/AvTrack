@@ -63,3 +63,45 @@ async def get_metar(bounds: str, limit: int = 2500) -> dict | None:
         "/CAP_WxCOP/api/weather-enhanced/metar/recent",
         {"bounds": bounds, "limit": limit},
     )
+
+
+async def get_station_weather(station_id: str) -> dict | None:
+    """GET /CAP_WxCOP/api/weather/station/<id> -- single-station METAR history
+    (last 6hr) + current TAF (with WxCOP's own KQ-association/host-station TAF
+    fallback logic already baked in server-side, not re-derived here), feeds the
+    REQUIREMENTS.md 3.3a "click an airfield to see METAR/TAF" popup. Note this
+    lives on the OTHER WxCOP blueprint (/api/weather/..., not /api/weather-enhanced/
+    like the other two functions here) -- confirmed via its actual source
+    (weather_api.py) on r815, not guessed."""
+    return await _get(f"/CAP_WxCOP/api/weather/station/{station_id}", {})
+
+
+async def get_nearest_taf(lat: float, lon: float, max_nm: float = 150) -> dict | None:
+    """GET /CAP_WxCOP/api/weather-enhanced/taf/nearest -- nearest station with a
+    currently-valid TAF (not necessarily this one -- most small GA fields don't
+    have their own), used for the lightweight Station Plot click popup (EWMC's
+    showNearestTafPopup -- the full METAR is already visible on the plot itself,
+    so only TAF needs fetching there). Doesn't share _get() above: WxCOP returns
+    "no TAF within range" as a 404 with a real `{"error": ...}` JSON body (not an
+    empty/broken response), and that's a legitimate, displayable answer -- not the
+    same as WxCOP being unreachable -- so this reads the body on a 404 instead of
+    letting raise_for_status() collapse both cases into the same None."""
+    if not settings.wxcop_enabled:
+        return None
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.wxcop_base_url,
+            timeout=10.0,
+            headers={"Host": settings.wxcop_host_header},
+        ) as client:
+            resp = await client.get(
+                "/CAP_WxCOP/api/weather-enhanced/taf/nearest",
+                params={"lat": lat, "lon": lon, "max_nm": max_nm},
+            )
+            if resp.status_code == 404:
+                return resp.json()  # {"error": "..."}
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        logger.warning("WxCOP TAF-nearest request failed: lat=%s lon=%s", lat, lon, exc_info=True)
+        return None

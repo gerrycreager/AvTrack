@@ -32,3 +32,39 @@ async def get_metar(
     if data is None:
         return {"available": False}
     return {"available": True, "metars": data.get("metars", [])}
+
+
+@router.get("/station/{station_id}")
+async def get_station(station_id: str):
+    """METAR history + TAF for one station -- REQUIREMENTS.md 3.3a, "click an
+    airfield to see its METAR and TAF, like EWMC." Mirrors EWMC's own
+    showStationPopup click behavior (full detail, used outside Station Plot
+    mode where the METAR isn't already drawn on the marker itself)."""
+    data = await wxcop_client.get_station_weather(station_id)
+    if data is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "station": data.get("station"),
+        "metars": data.get("metars", []),
+        "taf": data.get("taf"),
+        "kq_association": data.get("kq_association"),
+        "metar_note": data.get("metar_note"),
+    }
+
+
+@router.get("/taf-nearest")
+async def get_taf_nearest(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    max_nm: float = Query(150),
+):
+    """Nearest currently-valid TAF to a point -- REQUIREMENTS.md 3.3a. Mirrors
+    EWMC's showNearestTafPopup, used for the Station Plot click (the METAR is
+    already visible on the plot itself; only TAF needs fetching there)."""
+    data = await wxcop_client.get_nearest_taf(lat, lon, max_nm=max_nm)
+    if data is None:
+        return {"available": False}
+    if "error" in data:
+        return {"available": True, "found": False, "error": data["error"]}
+    return {"available": True, "found": True, **data}

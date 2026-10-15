@@ -342,12 +342,8 @@ async function refreshAirfields() {
         const rwy = p.longest_runway_ft
           ? `${p.longest_runway_ft} ft, ${p.hard_surface_available ? "hard surface" : "not hard-surfaced"}`
           : "runway data not loaded";
-        new maplibregl.Popup()
-          .setLngLat(e.lngLat)
-          .setHTML(
-            `<strong>${p.name || p.label}</strong>${p.is_military ? " (MIL)" : ""}<br>${p.icao_id || ""} ${p.faa_id ? `(${p.faa_id})` : ""}<br>${rwy}`
-          )
-          .addTo(map);
+        const headerHtml = `<strong>${p.name || p.label}</strong>${p.is_military ? " (MIL)" : ""}<br>${p.icao_id || ""} ${p.faa_id ? `(${p.faa_id})` : ""}<br>${rwy}`;
+        showAirfieldWeatherPopup(e.lngLat, p.icao_id, headerHtml);
       });
     }
     updateAirfieldZoomFilter();
@@ -582,6 +578,107 @@ function buildStationPlotInnerHtml(metar, showFullPlot) {
     <div class="sp-field sp-gust" style="position:absolute; left:18px; top:26px; width:34px; text-align:center;">${gustTxt}</div>`;
 }
 
+// Click-to-see-METAR/TAF (REQUIREMENTS.md 3.3a, added 2026-10-15) -- per Gerry:
+// "like EWMC we need to be able to click on an airfield and see its METAR and
+// TAF if available." Deliberately mirrors EWMC's own actual split rather than
+// inventing a new one (read directly from enhanced_weather_map_complete.html on
+// r815, not guessed): Station Plot mode already draws the METAR on the marker
+// itself, so its click only needs the lightweight nearest-TAF lookup
+// (showNearestTafPopup below); every other mode's click needs the full detail
+// (showAirfieldWeatherPopup), since nothing else on screen already shows it.
+function formatRawWxText(raw) {
+  // METAR/TAF raw text often has embedded newlines (TAF FM-groups especially) --
+  // escape for HTML then let CSS white-space:pre-wrap render them, same as EWMC's
+  // formatTAF.
+  const esc = (raw || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<pre style="white-space:pre-wrap; font: 11px ui-monospace, monospace; margin:4px 0 0; max-height:180px; overflow-y:auto;">${esc}</pre>`;
+}
+
+async function showNearestTafPopup(lngLat, metar) {
+  const popup = new maplibregl.Popup({ closeButton: true })
+    .setLngLat(lngLat)
+    .setHTML(`<div style="font-size:12px; min-width:220px;"><strong>${metar.station_id}</strong><br>Loading nearest TAF…</div>`)
+    .addTo(map);
+  try {
+    const res = await fetch(`/api/weather/taf-nearest?lat=${metar.latitude}&lon=${metar.longitude}`);
+    const data = await res.json();
+    if (!data.available || !data.found) {
+      popup.setHTML(
+        `<div style="font-size:12px; min-width:220px;"><strong>${metar.station_id}</strong><hr>` +
+          `<span style="color:#888;">${data.error || "TAF unavailable"}</span></div>`
+      );
+      return;
+    }
+    const srcNote =
+      data.station_id === metar.station_id
+        ? ""
+        : ` <span style="color:#888; font-weight:normal;">(nearest TAF: ${data.station_id}, ${data.distance_nm}nm)</span>`;
+    popup.setHTML(
+      `<div style="font-size:12px; min-width:260px;"><strong>${metar.station_id}</strong>${srcNote}${formatRawWxText(data.raw_text)}</div>`
+    );
+  } catch (err) {
+    popup.setHTML(`<div style="font-size:12px;"><strong>${metar.station_id}</strong><hr><span style="color:#888;">TAF lookup failed</span></div>`);
+  }
+}
+
+async function showAirfieldWeatherPopup(lngLat, icaoId, headerHtml) {
+  const popup = new maplibregl.Popup({ closeButton: true })
+    .setLngLat(lngLat)
+    .setHTML(`<div style="font-size:12px; min-width:220px;">${headerHtml}<br>Loading weather…</div>`)
+    .addTo(map);
+  if (!icaoId) {
+    popup.setHTML(`<div style="font-size:12px; min-width:220px;">${headerHtml}<br><span style="color:#888;">No station ID on file</span></div>`);
+    return;
+  }
+  try {
+    const res = await fetch(`/api/weather/station/${icaoId}`);
+    const data = await res.json();
+    if (!data.available) {
+      popup.setHTML(`<div style="font-size:12px; min-width:220px;">${headerHtml}<br><span style="color:#888;">Weather unavailable (WxCOP unreachable)</span></div>`);
+      return;
+    }
+    const obs = data.metars && data.metars[0];
+    const taf = data.taf;
+    if (!obs && !taf) {
+      popup.setHTML(
+        `<div style="font-size:12px; min-width:220px;">${headerHtml}<br><span style="color:#888;">${data.metar_note || "No recent METAR or TAF"}</span></div>`
+      );
+      return;
+    }
+    let metarHtml = "";
+    if (obs) {
+      const color = FLIGHT_CATEGORY_COLORS[obs.flight_category] || FLIGHT_CATEGORY_COLORS.unknown;
+      let wind = `${obs.wind_dir ?? "---"}° @ ${obs.wind_speed_kts ?? 0}kt`;
+      if (obs.wind_gust_kts) wind += ` G${obs.wind_gust_kts}`;
+      const temp = obs.temp_c != null ? `${obs.temp_c}°C` : "N/A";
+      const dew = obs.dewpoint_c != null ? `${obs.dewpoint_c}°C` : "N/A";
+      metarHtml = `
+        <div style="margin-top:4px;">
+          <span style="color:${color}; font-weight:700;">${obs.flight_category || ""}</span>
+          &nbsp;Wind ${wind}&nbsp;·&nbsp;${temp}/${dew}&nbsp;·&nbsp;Vis ${obs.visibility_sm ?? "?"}SM
+        </div>
+        ${formatRawWxText(obs.raw_text)}`;
+    } else if (data.metar_note) {
+      metarHtml = `<div style="color:#888; margin-top:4px;">${data.metar_note}</div>`;
+    }
+    let tafHtml = "";
+    if (taf && taf.raw_text) {
+      const tafSrcNote =
+        data.station && taf.station_id && taf.station_id !== data.station.station_id
+          ? ` <span style="color:#888; font-weight:normal;">(via ${taf.station_id})</span>`
+          : "";
+      tafHtml = `<hr style="margin:6px 0;"><strong>TAF</strong>${tafSrcNote}${formatRawWxText(taf.raw_text)}`;
+    }
+    const kqAssoc = data.kq_association;
+    const kqHtml = kqAssoc
+      ? `<div style="background:#1a3a5c; color:#7ec8e3; padding:3px 6px; border-radius:3px; font-size:10px; margin-top:4px;">KQ Association: ${kqAssoc.kq_station} ↔ ${kqAssoc.host_station}${kqAssoc.notes ? ` — ${kqAssoc.notes}` : ""}</div>`
+      : "";
+    popup.setHTML(`<div style="font-size:12px; min-width:260px;">${headerHtml}${metarHtml}${kqHtml}${tafHtml}</div>`);
+  } catch (err) {
+    popup.setHTML(`<div style="font-size:12px; min-width:220px;">${headerHtml}<br><span style="color:#888;">Weather lookup failed</span></div>`);
+  }
+}
+
 async function fetchStationPlotData() {
   try {
     const res = await fetch(`/api/weather/metar?bounds=${currentBoundsParam()}`);
@@ -610,36 +707,55 @@ function renderStationPlotMarkers() {
   const zoom = map.getZoom();
   const seen = new Set();
   for (const a of latestAirfieldRows) {
-    const minZ = STATION_PLOT_MIN_ZOOM[a.station_plot_tier] ?? 6;
-    if (zoom < minZ) continue;
-    seen.add(a.id);
-    const metar = a.icao_id ? latestMetarByIcao[a.icao_id] : null;
-    const showFull = zoom >= minZ + STATION_PLOT_FULL_ZOOM_OFFSET;
-    const [w, h] = metar ? stationPlotSize(showFull) : [10, 10];
-    const innerHtml = metar ? buildStationPlotInnerHtml(metar, showFull) : "";
+    try {
+      const minZ = STATION_PLOT_MIN_ZOOM[a.station_plot_tier] ?? 6;
+      if (zoom < minZ) continue;
+      seen.add(a.id);
+      const metar = a.icao_id ? latestMetarByIcao[a.icao_id] : null;
+      const showFull = zoom >= minZ + STATION_PLOT_FULL_ZOOM_OFFSET;
+      const [w, h] = metar ? stationPlotSize(showFull) : [10, 10];
+      const innerHtml = metar ? buildStationPlotInnerHtml(metar, showFull) : "";
 
-    let marker = stationPlotMarkers.get(a.id);
-    if (!marker) {
-      const el = document.createElement("div");
-      el.addEventListener("click", () => {
-        // No-data dots (marker._metar unset) aren't clickable -- nothing to show.
-        if (!marker._metar) return;
-        new maplibregl.Popup()
-          .setLngLat([a.longitude, a.latitude])
-          .setHTML(
-            `<strong>${marker._metar.station_id}</strong> ${marker._metar.flight_category ?? ""}<br><code>${marker._metar.raw_text ?? ""}</code>`
-          )
-          .addTo(map);
-      });
-      marker = new maplibregl.Marker({ element: el }).setLngLat([a.longitude, a.latitude]).addTo(map);
-      stationPlotMarkers.set(a.id, marker);
+      let marker = stationPlotMarkers.get(a.id);
+      if (!marker) {
+        const el = document.createElement("div");
+        el.addEventListener("click", (e) => {
+          // stopPropagation is required here -- Popup defaults to closeOnClick:true,
+          // and a marker click bubbles up through the DOM to the map container
+          // MapLibre itself listens on, so without this the same click that opens
+          // the popup immediately closes it again (found live 2026-10-15: the
+          // popup never appeared, not even a "Loading..." flash, same pattern the
+          // existing discovered-marker click handler below already guards against).
+          e.stopPropagation();
+          // Station Plot mode: the METAR is already drawn on the marker itself, so
+          // the click only adds TAF (EWMC's showNearestTafPopup) -- for a no-data
+          // dot there's no METAR to anchor that lookup on text/label, so fall back
+          // to the full station-detail popup instead (still useful: a "no METAR"
+          // field can still have its own or a KQ-associated TAF).
+          if (marker._metar) {
+            showNearestTafPopup([a.longitude, a.latitude], marker._metar);
+          } else {
+            const headerHtml = `<strong>${a.icao_id || a.faa_id || a.name}</strong>${a.is_military ? " (MIL)" : ""}`;
+            showAirfieldWeatherPopup([a.longitude, a.latitude], a.icao_id, headerHtml);
+          }
+        });
+        marker = new maplibregl.Marker({ element: el }).setLngLat([a.longitude, a.latitude]).addTo(map);
+        stationPlotMarkers.set(a.id, marker);
+      }
+      const el = marker.getElement();
+      el.className = metar ? "station-plot-marker" : "station-plot-marker station-plot-nodata";
+      el.style.width = `${w}px`;
+      el.style.height = `${h}px`;
+      el.innerHTML = innerHtml;
+      marker._metar = metar;
+    } catch (err) {
+      // One bad row (e.g. unexpected METAR shape) shouldn't blank the whole display --
+      // found live 2026-10-15 debugging "station plots have no text data": a single
+      // uncaught exception partway through this loop was silently killing every
+      // marker after (and including) the failing one, with nothing surfaced to the
+      // user beyond an empty map. Log it and keep going.
+      console.error("Station plot marker failed for", a.icao_id || a.id, err);
     }
-    const el = marker.getElement();
-    el.className = metar ? "station-plot-marker" : "station-plot-marker station-plot-nodata";
-    el.style.width = `${w}px`;
-    el.style.height = `${h}px`;
-    el.innerHTML = innerHtml;
-    marker._metar = metar;
   }
   // Drop markers for airfields that fell out of the viewport/zoom-tier range.
   for (const [id, marker] of stationPlotMarkers.entries()) {
