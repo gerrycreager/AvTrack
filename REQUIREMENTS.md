@@ -110,6 +110,22 @@ is reusable as the Phase 2 server's schema — not thrown away.
   the roster, reverted immediately via psql + clearing `dismissed_at` so it
   returned to pending for Gerry's own review, rather than left in the live
   roster as a side effect of testing.
+  **Datablock content changed 2026-10-15**: per Gerry, "the data labels
+  doesn't need the tail number but does need airspeed and altitude" — the
+  candidate marker's second line now shows `altitude_ft`/`ground_speed_kt`
+  (same "—" placeholder convention as the known-aircraft datablock) instead
+  of the tail number. Required capturing altitude/speed on the backend side
+  too: `DiscoveredCallsign.last_altitude_ft`/`last_ground_speed_kt` (new
+  columns, migration `b1081d4d9bbc`), populated by both the slow CONUS-sweep
+  scanner and the AO-scoped fast poller via the shared
+  `app/integrations/adsb_discovery.py` module (`extract_matches()`/
+  `upsert_matches()`), with the same `alt_baro=="ground"` → `0.0`
+  normalization convention used elsewhere. Note for future debugging: the
+  standalone `avtrack-cap-discovery.service` systemd unit runs as a long-lived
+  Python process, not re-imported per cycle — it needed an explicit
+  `systemctl restart` after this change before new sightings actually carried
+  altitude/speed; the in-process `avtrack-backend` poller picked the change up
+  automatically on its own already-scheduled restart.
 - **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
   figure (datablock and side panel both), ATC-datablock-style. Computed in
   `app/ingestion/poller.py` from consecutive real position deltas (altitude change
@@ -240,10 +256,26 @@ is reusable as the Phase 2 server's schema — not thrown away.
     `airfields-label`'s `text-color`/`text-halo-color` are a `tier`-keyed
     `match` expression mirroring EWMC's 5 colors, set once at layer creation —
     not touched by `setAirfieldDisplayMode()` — so it's on whenever labels are,
-    regardless of which dot-coloring mode is active. One deliberate
-    adaptation, not claimed as pixel-parity: MapLibre symbol-layer text has no
-    CSS background-box equivalent to EWMC's colored pill, so a heavier
-    `text-halo-color` approximates it instead of a true filled background.
+    regardless of which dot-coloring mode is active. First pass approximated
+    EWMC's colored pill with a heavier `text-halo-color` since MapLibre
+    symbol-layer text has no native CSS background-box property — per Gerry,
+    "What we've got for labels might work but isn't currently looking good."
+    **Redesigned 2026-10-15** to use the actual native mechanism for this:
+    `icon-image` + `icon-text-fit:"both"`. Five small rounded-rect images (one
+    per tier, fill+border colors still EWMC's exact `.apt-t1`..`.apt-t5`
+    values) are drawn on an offscreen `<canvas>` once at map load
+    (`registerAirfieldTierBadges()`) and registered via `map.addImage()`;
+    the label layer's `icon-image` is a `tier`-keyed `match` referencing
+    them, and `icon-text-fit:"both"` lets GL stretch each badge to the
+    rendered text's own bounding box — a true filled/bordered background,
+    not an approximation. Verified live (Playwright + `queryRenderedFeatures`)
+    against a tier-1 military field (red/white) and tier-2 hub (blue/white):
+    both render a solid pill exactly matching EWMC's colors. **Known
+    limitation, not yet addressed**: tiers 3-5 use EWMC's light gray/green/
+    purple fills, which read clearly on EWMC's own (typically more colorful)
+    basemap but are quite subtle against AvTrack's default light USGS Topo
+    basemap — worth flagging to Gerry rather than silently living with it,
+    since it's a basemap-contrast issue, not a bug in the mechanism itself.
 - **Area of Operations (AO) / Area of Interest (AOI) — desirement, not yet built**:
   Gerry wants to be able to identify airfields within an AO and/or a (typically
   larger) AOI specifically for label purposes, selected either by (a) a list-input of
