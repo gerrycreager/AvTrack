@@ -1027,6 +1027,64 @@ follow the NIMS taskbook."
   Verified live via Playwright against both the real (currently reachable)
   WxCOP instance and a mocked unavailable response — both display modes and
   the graceful-degradation path confirmed working with zero console errors.
+- **Click an airfield to see its METAR/TAF — shipped 2026-10-15.** Per Gerry:
+  "like EWMC we need to be able to click on an airfield and see its METAR and
+  TAF if available." Read EWMC's actual click handlers on r815
+  (`enhanced_weather_map_complete.html`) rather than inventing a new split:
+  EWMC uses two different popups depending on mode — `showNearestTafPopup`
+  when Station Plot is active (the METAR is already drawn on the marker
+  itself, so the click only needs to add TAF — not necessarily the clicked
+  station's own, since most small GA fields don't have one, hence "nearest"
+  via WxCOP's `/api/weather-enhanced/taf/nearest` KNN lookup) and
+  `showStationPopup` everywhere else (full METAR + TAF detail, since nothing
+  else on screen already shows the METAR — via WxCOP's
+  `/api/weather/station/<id>`, which already has its own KQ-association/
+  host-station TAF-fallback logic server-side, not re-derived here). Ported
+  both verbatim: two new same-origin proxy endpoints
+  (`GET /api/weather/station/{id}`, `GET /api/weather/taf-nearest`,
+  `app/api/weather.py` + `app/integrations/wxcop_client.py`, same
+  always-200-with-`available`-flag convention as the other two weather
+  routes), wired into both the `airfields-layer` click (full detail) and the
+  Station Plot marker click (nearest TAF, or full detail as a fallback for a
+  no-METAR marker). Verified live: KIND showed real METAR+TAF text in the
+  full-detail popup; a Station Plot full-plot marker showed the correct
+  nearest-TAF text.
+  **Two real bugs found and fixed while verifying this live** (both pre-existed
+  this feature, just newly exposed by testing it): (1) `renderStationPlotMarkers`
+  had no per-row error isolation — a single uncaught exception partway through
+  its loop silently killed every marker from that point on, with no visible
+  error, which is very likely the actual cause behind Gerry's separate
+  "station plots don't have any text data" report the same session (intermittent,
+  since it depended on exactly which row triggered it); now wrapped per-row in
+  try/catch so one bad row can't blank the whole display. (2) The new Station
+  Plot TAF popup never appeared at all (not even a loading flash) until a fix:
+  MapLibre's `Popup` defaults to `closeOnClick: true`, and a DOM Marker's click
+  bubbles up through the map container MapLibre itself listens on for that
+  close-on-click behavior, so the very click that opened the popup immediately
+  closed it again — needed `e.stopPropagation()`, the same pattern the existing
+  discovered-aircraft marker click handler already used (a reusable lesson:
+  any new MapLibre Marker click handler that opens a Popup needs this, it's not
+  optional).
+  **Separately traced (not fixed — lives in WxCOP's own codebase on r815, a
+  sibling system outside this repo) a real root cause behind the bulk Station
+  Plot text sometimes not loading at a normal regional zoom**: WxCOP's
+  `/api/weather-enhanced/metar/recent` endpoint hangs indefinitely for some
+  medium-sized regional bounding boxes specifically, confirmed by querying it
+  directly (bypassing AvTrack's backend entirely) — a huge CONUS-wide bbox and
+  a tiny single-airport bbox both respond in low single-digit seconds, but
+  (e.g.) a ~4°×2° Indiana-area bbox never returns at all regardless of result
+  `limit` (tested down to `limit=50`), while WxCOP's *other* endpoint
+  (`/api/weather-impacts/airports`) answers the identical bbox in ~1.4s. Read
+  the query in `weather_enhanced_api.py` on r815: a `DISTINCT ON (station_id)`
+  CTE joined to `observations.airports`, filtered by
+  `ST_Intersects(m.location::geometry, {bbox})` — the `::geometry` cast inside
+  the predicate is a plausible culprit if `observations.metar.location` is
+  indexed as `geography` rather than `geometry` (a geography-typed spatial
+  index may not get used once the column is cast away from its indexed type
+  for every row), but this wasn't confirmed against the live query plan and
+  could equally be data2 host load/instability (data2 was confirmed down for
+  about a week starting around this time, see the WxCOP outage note above) --
+  flagged to Gerry as a WxCOP-side issue to investigate there, not fixed here.
 - **Explicitly not yet built** (scoped, not forgotten):
   - User-selectable airfield pinning/highlighting, independent of the
     existing zoom-tier auto-reveal — per Gerry: "if the auto-expose as we
