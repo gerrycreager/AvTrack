@@ -880,7 +880,21 @@ function airborneState(pos) {
 // candidate drops off the map once its last sighting goes stale, same
 // reasoning as sweepStaleAircraft above for registered aircraft.
 const discoveredMarkers = new Map(); // DiscoveredCallsign.id -> maplibregl.Marker
-const DISCOVERED_STALE_MINUTES = 20; // comfortably under the slow sweep's ~33min full-grid cycle so a still-flying candidate doesn't flicker out between its own sightings
+// Bug found live 2026-10-15 (Gerry: two aircraft visible on ADS-B Exchange,
+// CAP161/CAP2165, weren't showing on our map -- confirmed via a direct adsb.lol
+// query that both were actively broadcasting at that moment, so this wasn't an
+// adsb.lol coverage gap like the CAP4634/CAP2717 case earlier the same day). The
+// previous value (20) had the reasoning backwards: it was meant to be "comfortably
+// under" the slow 22-point CONUS sweep's full-grid cycle, but a candidate seen only
+// by that slow net is re-sighted once per lap (22 points * 90s/point = 33min under
+// ideal conditions, more if any point hits adsb.lol's rate limit), so a 20min
+// staleness window guaranteed it would flicker off the map for ~13min of every
+// cycle even while continuously flying -- exactly what happened to both aircraft
+// here. Must be comfortably OVER one full lap instead, with margin for jitter/
+// backoff, not under it. A candidate inside the active AO stays fresh regardless
+// (the AO-scoped poller re-sights it every 60s -- see ao_discovery_poller.py), so
+// this constant only matters for the nationwide (no-AO or outside-AO) case.
+const DISCOVERED_STALE_MINUTES = 45;
 const DISCOVERED_POLL_MS = 45000;
 
 function approveDiscovered(id) {
