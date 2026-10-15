@@ -170,6 +170,36 @@ is reusable as the Phase 2 server's schema — not thrown away.
   value on a live candidate row (staging data, not roster data, freely
   correctable) rather than waiting out a full ~33min sweep lap for a real
   heading to land naturally; the next real sighting overwrites it.
+  **Root cause actually fixed, not just hidden, 2026-10-15**: per Gerry,
+  "According to ADS-B Exchange, CAP161 is reporting regularly, last report
+  within 60 sec of NOW" — while AvTrack's own data for that tail still lagged
+  by up to a full slow-sweep lap. Queried adsb.lol directly and it already had
+  the identical sub-second-fresh data (`seen: 0.0`), proving the gap was
+  entirely AvTrack's own poll strategy, not data availability — the slow
+  22-point sweep is the right tool for *discovering* a brand-new candidate
+  nobody's seen yet, but a bad one for *tracking* a candidate already known,
+  since it only revisits any given point once per ~33min lap regardless of
+  how often that aircraft itself updates. Added a dedicated fast poller
+  (`app/ingestion/candidate_refresh_poller.py`,
+  `refresh_known_candidates()` in `adsb_discovery.py`) that re-sights every
+  already-discovered, non-dismissed candidate every 30s via the same bulk
+  `/v2/reg/` call shape the registered-aircraft poller already uses safely
+  (one call per cycle covering every known candidate tail at once, same
+  rate-limit-avoidance rationale as `app/adsb/adsb_lol.py`) — matches a
+  returned aircraft back to a candidate row only when its current flight
+  callsign still matches that row's stored callsign exactly, so a tail now
+  squawking something else is left for the slow sweep to catch as its own
+  distinct row, same as before. Verified live: CAP161 went from a
+  46-minute-old sighting to a 5-second-old one with real altitude (1475ft)/
+  speed (102kt)/heading (180°) on the very next cycle; CAP2165 likewise
+  refreshed and showed it had landed (0ft, 8.2kt taxi speed); CAP3226 (the
+  earlier-confirmed landed/ghost candidate) correctly stayed un-refreshed
+  since it no longer appears in adsb.lol's results at all, and dropped off
+  the map on its own once stale. With real sightings landing every ~30s
+  instead of once per ~33min lap, `DISCOVERED_STALE_MINUTES` also dropped
+  back down from 45 to 5 (≈10x the refresh cadence) — the earlier fade/
+  "Last seen Xm ago" UI from the previous fix is unchanged, it's just acting
+  on much more accurate data now.
 - **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
   figure (datablock and side panel both), ATC-datablock-style. Computed in
   `app/ingestion/poller.py` from consecutive real position deltas (altitude change
