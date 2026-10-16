@@ -1534,10 +1534,16 @@ standing security practice, Claude does not set a human's password) before
 he can use the app again; this was flagged to him directly, not left for him
 to discover.
 
-**Not yet done (phase 4 + cleanup):** the legacy-data backfill (attaching
-Gerry's pre-existing aircraft/AO/sorties to a real "legacy" Mission so they
-show up under his new account) still needs his CAP ID once he's created his
-account. GARS coordinate parsing (for AO-center entry) is not yet built. The
+**Shipped (2026-10-16)**: Gerry's real account exists (CAP ID 530673, created
+by him directly on cosp1 -- Claude never saw his password, per standing
+practice). `scripts/backfill_legacy_mission.py` (idempotent, safe to re-run)
+created a "Legacy" Mission owned by his account and attached everything that
+predated Mission as a real entity: the 30 active aircraft (all of them --
+there was no pre-existing OperationsArea row to attach, confirmed empty
+earlier) and all 7 existing Sortie rows.
+
+**Not yet done (phase 4):** GARS coordinate parsing (for AO-center entry) is
+not yet built. The
 `optional_mission_member`/`mission_id`-omitted fallback paths added in
 phases 2-3 (see app/auth.py's docstring on it) are a deliberate transitional
 seam, not permanent -- once every caller always sends mission_id, those
