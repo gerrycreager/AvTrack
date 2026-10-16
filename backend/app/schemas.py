@@ -256,6 +256,66 @@ class DiscoveredCallsignOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LoginIn(BaseModel):
+    """CAP ID + password + a TOTP authenticator-app code -- MFA, per Gerry's
+    explicit choice (REQUIREMENTS.md open question 7, added 2026-10-16). See
+    app/auth.py."""
+
+    cap_id: str
+    password: str
+    totp_code: str
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+    totp_code: str
+
+
+class UserOut(BaseModel):
+    id: UUID
+    cap_id: str
+    display_name: str
+
+    model_config = {"from_attributes": True}
+
+
+class MissionOut(BaseModel):
+    id: UUID
+    name: str
+    mission_number: str | None
+    created_by: UUID
+    created_at: datetime
+    closed_at: datetime | None
+    # The CALLING user's role on this mission -- not a column on Mission itself
+    # (a mission has no single "role"), filled in per-request from the caller's
+    # own MissionMembership row. Descriptive only, per Gerry -- see that model's
+    # docstring in models.py.
+    role: str | None = None
+
+
+class MeOut(BaseModel):
+    user: UserOut
+    missions: list[MissionOut]
+
+
+class MissionCreateIn(BaseModel):
+    name: str
+    mission_number: str | None = None
+    role: str | None = None  # the creator's own role tag on this mission
+
+
+class MissionMemberIn(BaseModel):
+    cap_id: str
+    role: str | None = None
+
+
+class MissionMemberOut(BaseModel):
+    cap_id: str
+    display_name: str
+    role: str | None
+
+
 class OperationsAreaIn(BaseModel):
     center_latitude: float
     center_longitude: float

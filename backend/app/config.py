@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     # Same kill-switch convention as adsb_polling_enabled.
     candidate_refresh_polling_enabled: bool = True
     candidate_refresh_poll_interval_seconds: int = 30
+    # Per-user/per-mission accounts (REQUIREMENTS.md open question 7, added
+    # 2026-10-16 per Gerry). Sessions are opaque random tokens (app/auth.py),
+    # not signed JWTs, so there's no secret key to manage -- just a TTL and
+    # whether the cookie requires HTTPS. secure=False by default so login still
+    # works on the current plain-HTTP LAN deployment (192.168.0.57:8000);
+    # set true once this is served over HTTPS (e.g. via the r815 reverse proxy).
+    session_ttl_hours: int = 12
+    session_cookie_secure: bool = False
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:

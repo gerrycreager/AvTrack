@@ -446,6 +446,101 @@ class DiscoveredCallsign(Base):
     __table_args__ = (UniqueConstraint("tail_number", "callsign", name="uq_discovered_tail_callsign"),)
 
 
+class User(Base):
+    """A standalone AvTrack account (REQUIREMENTS.md open question 7, added
+    2026-10-16 per Gerry's per-user/per-mission request -- IC/Ops/AOBD/COMMS all
+    need to log in and share a mission's common operating picture). Login
+    identity is CAP ID, not email -- there's no email column here since nothing
+    in this app sends mail. No self-service signup: accounts are provisioned by
+    scripts/create_user.py, matching this project's existing one-off-admin-script
+    pattern (scripts/import_callsign_tails.py etc.) rather than a signup/reset
+    flow this app has no mail/SMS infrastructure to build.
+
+    This table and app/auth.py's get_current_user/require_mission_member are
+    deliberately the only things that know how a request maps to an identity --
+    a future CAP eServices SSO adapter replaces that module, not every route
+    that depends on it."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    cap_id: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    # Base32 TOTP secret (RFC 6238), generated once at account creation. Login is
+    # CAP ID + password + a 6-digit authenticator-app code -- Gerry's explicit
+    # choice over email/SMS one-time codes, since this app has no outbound
+    # mail/SMS infrastructure to build either of those on.
+    totp_secret: Mapped[str] = mapped_column(String(64))
+    display_name: Mapped[str] = mapped_column(String(100))
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    memberships: Mapped[list["MissionMembership"]] = relationship(back_populates="user", lazy="selectin")
+
+
+class UserSession(Base):
+    """A logged-in session. DB-backed (not a stateless JWT) so logout is a real
+    DELETE, matching this codebase's generally DB-centric style. Only the
+    SHA-256 hash of the cookie's token is stored here -- the raw token lives
+    only in the HttpOnly session cookie, so a DB read alone can't produce a
+    usable session."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Mission(Base):
+    """A real, first-class mission -- the scoping entity for a common operating
+    picture shared by IC/Ops/AOBD/COMMS (added 2026-10-16 per Gerry: "those
+    groups need to be able to see a particular mission(s)"). Replaces the
+    free-text Sortie.mission_number as the actual backend concept a user's data
+    (aircraft, AO, sorties) is scoped by; `mission_number` is kept here too
+    (same CAP YY-X-NNNN free-text convention Sortie.mission_number already used)
+    purely for display/default-fill, now backed by a real row.
+
+    `closed_at` is a timestamp, not a bool, matching DiscoveredCallsign's
+    `dismissed_at` convention elsewhere in this codebase."""
+
+    __tablename__ = "missions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(200))
+    mission_number: Mapped[str | None] = mapped_column(String(50))
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    memberships: Mapped[list["MissionMembership"]] = relationship(back_populates="mission", lazy="selectin")
+
+
+class MissionMembership(Base):
+    """Who can see/edit a given Mission's data. Per Gerry, role is descriptive
+    only -- "IC"/"Ops"/"AOBD"/"COMMS"/free text, shown on the common operating
+    picture -- and is NEVER checked for authorization: "each and every one of
+    those could be entering data to track aircraft." Authorization is purely
+    "does a row exist here for (mission, user)?" -- see app/auth.py's
+    require_mission_member, which is the only place this table's membership
+    (not role) is enforced."""
+
+    __tablename__ = "mission_memberships"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    mission_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("missions.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str | None] = mapped_column(String(30))
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    mission: Mapped["Mission"] = relationship(back_populates="memberships")
+    user: Mapped["User"] = relationship(back_populates="memberships")
+
+    __table_args__ = (UniqueConstraint("mission_id", "user_id", name="uq_mission_membership"),)
+
+
 class OperationsArea(Base):
     """The single active Area of Operations (AO) -- REQUIREMENTS.md 3.1/3.2's
     AO/AOI concept, promoted 2026-10-14 from pure-frontend (frontend/src/main.js's

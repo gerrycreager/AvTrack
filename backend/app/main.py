@@ -7,7 +7,23 @@ from fastapi.staticfiles import StaticFiles
 
 from app.adsb.adsb_lol import AdsbLolProvider
 from app.adsb.flightaware import FlightAwareProvider
-from app.api import aircraft, airfields, airspace, discovered, events, gis, locate, ops_board, reports, sorties, swim, weather, ws
+from app.api import (
+    aircraft,
+    airfields,
+    airspace,
+    auth,
+    discovered,
+    events,
+    gis,
+    locate,
+    missions,
+    ops_board,
+    reports,
+    sorties,
+    swim,
+    weather,
+    ws,
+)
 from app.config import settings
 from app.db import init_db
 from app.ingestion.ao_discovery_poller import run_ao_discovery_loop
@@ -36,10 +52,12 @@ async def no_cache_for_frontend(request, call_next):
 app.include_router(aircraft.router)
 app.include_router(airfields.router)
 app.include_router(airspace.router)
+app.include_router(auth.router)
 app.include_router(discovered.router)
 app.include_router(events.router)
 app.include_router(gis.router)
 app.include_router(locate.router)
+app.include_router(missions.router)
 app.include_router(ops_board.router)
 app.include_router(reports.router)
 app.include_router(sorties.router)
