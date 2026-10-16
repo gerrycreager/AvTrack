@@ -1511,14 +1511,37 @@ independent AOs that don't clobber each other, independent aircraft rosters
 (a roster upload into one mission invisible to another), and an
 approve-into-mission that only affects the approving mission's roster.
 
-**Not yet done (phases 3-4 of the rollout plan):** no route yet *requires*
-login — that lands with the frontend login gate so existing usage doesn't
-break mid-rollout. The actual legacy-data backfill (attaching Gerry's
-currently-live aircraft/AO to a real "legacy" Mission) is also pending: it
-needs Gerry's own account to exist first, and per standing security practice
-here, Claude doesn't set a human's password — Gerry needs to run
-`scripts/create_user.py <his CAP ID> "Gerry Creager"` himself. GARS coordinate
-parsing (for AO-center entry) is not yet built.
+**Shipped (2026-10-16, phase 3):** a login gate (`#login-overlay` in
+`index.html`) now blocks the tracking UI (map markers, roster, Ops Board,
+AO) until `GET /api/auth/me` succeeds -- reference layers (airfields, SUA,
+uploaded GIS layers) still load unauthenticated, matching the backend (only
+identity/mission-scoped routes require a session). A mission switcher
+(`#mission-select`, replacing nothing -- it sits above the pre-existing
+"Session Mission #" free-text field, which is untouched and still just a
+display convenience) lets a user pick which of their missions is active;
+every mission-scoped fetch (`loadKnownAircraft`, roster upload,
+`loadPersistedOpsArea`, the `locate()` AO PUT, `refreshDiscoveredMarkers`,
+the Ops Board's discovered-candidates fetch, approve/dismiss) now carries
+`?mission_id=` when one is selected, via a single `withMissionParam()`
+helper. Inline "+ New mission" and "Add Member" mini-forms cover mission
+creation and adding a member by CAP ID. **IMPORTANT, found live while
+building this**: `frontend/` is served directly with no build step, so these
+changes are live on the running app the moment the files are saved -- the
+live app now requires a login, and there is no account yet except ones
+Claude provisioned for its own testing (created and deleted). **Gerry must
+run `scripts/create_user.py <his CAP ID> "Gerry Creager"` himself** (per
+standing security practice, Claude does not set a human's password) before
+he can use the app again; this was flagged to him directly, not left for him
+to discover.
+
+**Not yet done (phase 4 + cleanup):** the legacy-data backfill (attaching
+Gerry's pre-existing aircraft/AO/sorties to a real "legacy" Mission so they
+show up under his new account) still needs his CAP ID once he's created his
+account. GARS coordinate parsing (for AO-center entry) is not yet built. The
+`optional_mission_member`/`mission_id`-omitted fallback paths added in
+phases 2-3 (see app/auth.py's docstring on it) are a deliberate transitional
+seam, not permanent -- once every caller always sends mission_id, those
+fallback branches should be deleted.
 
 ## 4. UX Philosophy (per Gerry, 2026-09-13)
 

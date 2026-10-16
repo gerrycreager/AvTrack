@@ -107,6 +107,30 @@
     #basemap-switcher { position: absolute; top: 10px; right: 202px; z-index: 1; }
     #basemap-switcher select { padding: 6px 8px; border-radius: 4px; border: 1px solid #888; }
 
+    /* Login gate + logged-in-user badge (added 2026-10-16, per-user/per-mission work) */
+    /* [hidden] must win over the plain-id display rule below, or toggling the
+       `hidden` property via JS has no visual effect -- found live 2026-10-16. */
+    #login-overlay[hidden], #user-badge[hidden] { display: none; }
+    #login-overlay {
+      position: fixed; inset: 0; z-index: 10; background: rgba(10, 12, 14, 0.92);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #login-form {
+      background: #1c2126; color: #e8eaed; padding: 24px 28px; border-radius: 8px;
+      width: 280px; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px;
+    }
+    #login-form h2 { margin: 0 0 6px 0; font-size: 16px; }
+    #login-form label { font-size: 12px; }
+    #login-form input { width: 100%; box-sizing: border-box; padding: 6px; margin-top: 3px; border-radius: 4px; border: 1px solid #444; background: #14181c; color: #e8eaed; }
+    #login-form button { padding: 8px; border-radius: 4px; border: none; background: #2b6cb0; color: white; cursor: pointer; font-size: 13px; }
+    #login-error { color: #ff6b6b; font-size: 12px; min-height: 14px; }
+    #user-badge {
+      position: absolute; top: 10px; right: 10px; z-index: 1;
+      background: rgba(20, 24, 28, 0.85); color: #e8eaed; font-size: 12px;
+      padding: 5px 8px; border-radius: 4px; display: flex; align-items: center; gap: 8px;
+    }
+    #user-badge button { font-size: 11px; cursor: pointer; }
+
     /* Airspace (SUA) toggles + custom mission-layer upload -- REQUIREMENTS.md 3.2 */
     #layers-panel {
       position: absolute; top: 50px; left: 10px; z-index: 1; width: 210px;
@@ -260,6 +284,20 @@
 </head>
 <body>
   <div id="map"></div>
+  <div id="login-overlay" hidden>
+    <form id="login-form">
+      <h2>AvTrack Login</h2>
+      <label>CAP ID<br/><input type="text" id="login-cap-id" autocomplete="username" required /></label>
+      <label>Password<br/><input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <label>Authenticator code<br/><input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required /></label>
+      <button type="submit">Log In</button>
+      <div id="login-error"></div>
+    </form>
+  </div>
+  <div id="user-badge" hidden>
+    <span id="user-badge-name"></span>
+    <button id="logout-btn">Logout</button>
+  </div>
   <div id="locate-bar">
     <input id="locate-input" placeholder="ICAO id, lat,lon, or MGRS/USNG" />
     <input id="locate-radius" type="number" min="0" step="1" value="10" title="Operations area radius" />
@@ -298,6 +336,27 @@
       <button id="gis-upload-btn">Add</button>
     </div>
     <div id="gis-layers-list"><em style="color:#9aa4ad;">None uploaded</em></div>
+    <div class="divider"></div>
+    <h3>Mission</h3>
+    <div style="margin-bottom:4px;">
+      <select id="mission-select" style="width:100%; box-sizing:border-box; padding:4px; border-radius:3px; border:1px solid #444; background:#14181c; color:#e8eaed; font-size:12px;">
+        <option value="">— none (legacy / unscoped) —</option>
+      </select>
+    </div>
+    <button id="mission-new-toggle" type="button" style="font-size:11px; margin-bottom:4px;">+ New mission</button>
+    <div id="mission-new-form" hidden style="margin-bottom:6px;">
+      <input type="text" id="mission-new-name" placeholder="Mission name" style="width:100%; box-sizing:border-box; margin-bottom:3px;" />
+      <input type="text" id="mission-new-number" placeholder="Mission # (YY-X-NNNN, optional)" style="width:100%; box-sizing:border-box; margin-bottom:3px;" />
+      <input type="text" id="mission-new-role" placeholder="Your role (IC/Ops/AOBD/COMMS, optional)" style="width:100%; box-sizing:border-box; margin-bottom:3px;" />
+      <button id="mission-new-create" type="button">Create</button>
+    </div>
+    <div id="mission-members-section" style="display:none;">
+      <div id="mission-members-list" style="font-size:11px; color:#9aa4ad; margin-bottom:4px;"></div>
+      <input type="text" id="mission-add-cap-id" placeholder="CAP ID to add" style="width:46%; box-sizing:border-box;" />
+      <input type="text" id="mission-add-role" placeholder="Role" style="width:44%; box-sizing:border-box;" />
+      <button id="mission-add-member-btn" type="button" style="width:100%; margin-top:3px;">Add Member</button>
+      <div id="mission-members-status" style="font-size:10px; color:#9aa4ad;"></div>
+    </div>
     <div class="divider"></div>
     <h3>Session Mission #</h3>
     <div style="margin-bottom:4px;">

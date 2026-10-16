@@ -101,6 +101,26 @@ const map = new maplibregl.Map({
 window.map = map; // exposed deliberately for console/devtools debugging
 window.openSortiePanel = openSortiePanel; // same -- lets devtools/tests open the panel for any tail directly
 
+// ── Login + mission scoping (added 2026-10-16, per-user/per-mission work) ──
+// mission_id stays OPTIONAL on every backend call during this rollout (see
+// app/auth.py's optional_mission_member docstring) -- omitting it preserves
+// the exact pre-login global/single-AO behavior, so currentMissionId starts
+// null (no mission selected) rather than forcing a choice before the map is
+// usable. Persisted to localStorage purely as a per-browser convenience
+// (mirrors the existing MISSION_NUMBER_KEY pattern below) -- the backend
+// independently re-checks membership on every mission-scoped call, so a
+// stale/forged value here can't leak another mission's data.
+const CURRENT_MISSION_KEY = "avtrack_current_mission_id";
+let currentUser = null;
+let currentMissions = [];
+let currentMissionId = localStorage.getItem(CURRENT_MISSION_KEY) || null;
+
+function withMissionParam(url) {
+  if (!currentMissionId) return url;
+  const qp = `mission_id=${encodeURIComponent(currentMissionId)}`;
+  return url.includes("?") ? `${url}&${qp}` : `${url}?${qp}`;
+}
+
 // True once the map's initial style load has completed. Deliberately NOT
 // map.isStyleLoaded() -- found live 2026-09-13 (Gerry: "I looked and didn't see the
 // MGRS box either"): that method tracks whether all currently-visible *tiles* have
@@ -844,9 +864,16 @@ function setOpsArea(center, radiusNm) {
   }
 }
 
+// Added 2026-10-16 alongside mission-switching -- a mission with no AO set
+// must not keep showing the PREVIOUS mission's circle on the map.
+function clearOpsArea() {
+  const source = map.getSource("ops-area");
+  if (source) source.setData({ type: "FeatureCollection", features: [] });
+}
+
 async function loadKnownAircraft() {
   try {
-    const res = await fetch("/api/aircraft");
+    const res = await fetch(withMissionParam("/api/aircraft"));
     const rows = await res.json();
     rows.forEach((a) => {
       knownAircraft.add(a.tail_number);
@@ -869,11 +896,12 @@ let aoIsSet = false;
 // has -- the AO is otherwise only (re-)drawn from a fresh locate() call.
 async function loadPersistedOpsArea() {
   try {
-    const res = await fetch("/api/discovered/ao");
+    const res = await fetch(withMissionParam("/api/discovered/ao"));
     if (!res.ok) return;
     const ao = await res.json();
     aoIsSet = !!ao;
     if (ao) setOpsArea([ao.center_longitude, ao.center_latitude], ao.radius_nm);
+    else clearOpsArea(); // e.g. switched to a mission with no AO set yet
   } catch (err) {
     console.error("Failed to load persisted Area of Operations", err);
   }
@@ -1019,7 +1047,7 @@ const DISCOVERED_STALE_MINUTES = 5;
 const DISCOVERED_POLL_MS = 45000;
 
 function approveDiscovered(id) {
-  return fetch(`/api/discovered/${id}/approve`, { method: "POST" })
+  return fetch(withMissionParam(`/api/discovered/${id}/approve`), { method: "POST" })
     .then(() => Promise.all([loadKnownAircraft(), refreshDiscoveredMarkers()]))
     .then(() => {
       if (!document.getElementById("ops-board-panel").hidden) refreshOpsBoard();
@@ -1027,7 +1055,7 @@ function approveDiscovered(id) {
 }
 
 function dismissDiscovered(id) {
-  return fetch(`/api/discovered/${id}/dismiss`, { method: "POST" })
+  return fetch(withMissionParam(`/api/discovered/${id}/dismiss`), { method: "POST" })
     .then(() => refreshDiscoveredMarkers())
     .then(() => {
       if (!document.getElementById("ops-board-panel").hidden) refreshOpsBoard();
@@ -1037,7 +1065,7 @@ function dismissDiscovered(id) {
 async function refreshDiscoveredMarkers() {
   let rows;
   try {
-    const res = await fetch("/api/discovered?ao_filter=false");
+    const res = await fetch(withMissionParam("/api/discovered?ao_filter=false"));
     rows = await res.json();
   } catch (err) {
     console.error("Failed to load discovered candidates", err);
@@ -1751,7 +1779,10 @@ const OPS_BOARD_STATE_LABEL = {
 
 async function refreshOpsBoard() {
   try {
-    const [boardRes, discoveredRes] = await Promise.all([fetch("/api/ops-board?hours=24"), fetch("/api/discovered")]);
+    const [boardRes, discoveredRes] = await Promise.all([
+      fetch("/api/ops-board?hours=24"),
+      fetch(withMissionParam("/api/discovered")),
+    ]);
     const { rows, generated_at } = await boardRes.json();
     renderDiscoveredSection(discoveredRes.ok ? await discoveredRes.json() : []);
     renderOpsBoardTable(rows);
@@ -1943,7 +1974,7 @@ async function locate(query) {
     // Persist to the backend (REQUIREMENTS.md 3.1, added 2026-10-14) so the
     // AO-scoped discovery poller can geofence against it -- additive, doesn't
     // change the draw-only behavior above.
-    fetch("/api/discovered/ao", {
+    fetch(withMissionParam("/api/discovered/ao"), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ center_latitude: latitude, center_longitude: longitude, radius_nm: radiusNm }),
@@ -2183,7 +2214,7 @@ document.getElementById("roster-upload-btn").addEventListener("click", async () 
   const formData = new FormData();
   formData.append("file", file);
   status.textContent = "Uploading…";
-  const res = await fetch("/api/aircraft/roster", { method: "POST", body: formData });
+  const res = await fetch(withMissionParam("/api/aircraft/roster"), { method: "POST", body: formData });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     status.textContent = `Failed: ${err.detail || res.statusText}`;
@@ -2238,6 +2269,179 @@ map.on("zoom", renderStationPlotMarkers); // instant barb-only/full-plot tier fe
 map.on("load", refreshSua);
 map.on("moveend", scheduleSuaRefresh);
 map.on("load", refreshGisLayerList);
-loadKnownAircraft().then(connectWebSocket);
-loadPersistedOpsArea();
-refreshDiscoveredMarkers();
+
+// ── Login gate + mission switcher (added 2026-10-16) ───────────────────────
+// Everything tracking-related (loadKnownAircraft/loadPersistedOpsArea/
+// refreshDiscoveredMarkers/the websocket) now waits for a successful login
+// instead of firing unconditionally -- reference/GIS data above (airfields,
+// SUA, uploaded layers) stays unauthenticated, matching the backend (only
+// the identity/mission-scoped routes require a session).
+function initTrackingData() {
+  loadKnownAircraft().then(connectWebSocket);
+  loadPersistedOpsArea();
+  refreshDiscoveredMarkers();
+}
+
+function clearKnownAircraft() {
+  // Additive-only Sets/Maps (same philosophy as roster upload) never shrink
+  // on their own -- switching missions must not leave a previous mission's
+  // aircraft looking "known" in this one.
+  knownAircraft.clear();
+  callsignByTail.clear();
+  defaultPicByTail.clear();
+}
+
+function populateMissionSelect() {
+  const select = document.getElementById("mission-select");
+  const previousValue = currentMissionId || "";
+  select.innerHTML = '<option value="">— none (legacy / unscoped) —</option>';
+  for (const m of currentMissions) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.mission_number ? `${m.name} (${m.mission_number})` : m.name;
+    select.appendChild(opt);
+  }
+  select.value = currentMissions.some((m) => m.id === previousValue) ? previousValue : "";
+  if (select.value !== previousValue) {
+    // The persisted mission no longer exists/isn't ours anymore -- fall back
+    // to unscoped rather than silently keeping a dead id around.
+    currentMissionId = null;
+    localStorage.removeItem(CURRENT_MISSION_KEY);
+  }
+  updateMissionMembersVisibility();
+}
+
+function updateMissionMembersVisibility() {
+  document.getElementById("mission-members-section").style.display = currentMissionId ? "block" : "none";
+  if (currentMissionId) refreshMissionMembers();
+}
+
+async function refreshMissionMembers() {
+  const list = document.getElementById("mission-members-list");
+  try {
+    const res = await fetch(`/api/missions/${currentMissionId}/members`);
+    if (!res.ok) {
+      list.textContent = "Could not load members.";
+      return;
+    }
+    const members = await res.json();
+    list.innerHTML = members.map((m) => `${m.display_name} (${m.cap_id})${m.role ? ` — ${m.role}` : ""}`).join("<br/>");
+  } catch (err) {
+    console.error("Failed to load mission members", err);
+    list.textContent = "Could not load members.";
+  }
+}
+
+document.getElementById("mission-select").addEventListener("change", async (e) => {
+  currentMissionId = e.target.value || null;
+  if (currentMissionId) localStorage.setItem(CURRENT_MISSION_KEY, currentMissionId);
+  else localStorage.removeItem(CURRENT_MISSION_KEY);
+  clearKnownAircraft();
+  updateMissionMembersVisibility();
+  await loadKnownAircraft();
+  await loadPersistedOpsArea();
+  await refreshDiscoveredMarkers();
+  if (!document.getElementById("ops-board-panel").hidden) refreshOpsBoard();
+});
+
+document.getElementById("mission-new-toggle").addEventListener("click", () => {
+  const form = document.getElementById("mission-new-form");
+  form.hidden = !form.hidden;
+});
+
+document.getElementById("mission-new-create").addEventListener("click", async () => {
+  const name = document.getElementById("mission-new-name").value.trim();
+  if (!name) {
+    alert("Mission name is required.");
+    return;
+  }
+  const mission_number = document.getElementById("mission-new-number").value.trim() || null;
+  const role = document.getElementById("mission-new-role").value.trim() || null;
+  const res = await fetch("/api/missions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, mission_number, role }),
+  });
+  if (!res.ok) {
+    alert("Could not create mission.");
+    return;
+  }
+  const mission = await res.json();
+  currentMissions.push(mission);
+  document.getElementById("mission-new-name").value = "";
+  document.getElementById("mission-new-number").value = "";
+  document.getElementById("mission-new-role").value = "";
+  document.getElementById("mission-new-form").hidden = true;
+  populateMissionSelect();
+  document.getElementById("mission-select").value = mission.id;
+  document.getElementById("mission-select").dispatchEvent(new Event("change"));
+});
+
+document.getElementById("mission-add-member-btn").addEventListener("click", async () => {
+  if (!currentMissionId) return;
+  const cap_id = document.getElementById("mission-add-cap-id").value.trim();
+  const role = document.getElementById("mission-add-role").value.trim() || null;
+  const status = document.getElementById("mission-members-status");
+  if (!cap_id) return;
+  const res = await fetch(`/api/missions/${currentMissionId}/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cap_id, role }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    status.textContent = `Failed: ${err.detail || res.statusText}`;
+    return;
+  }
+  status.textContent = "Added.";
+  document.getElementById("mission-add-cap-id").value = "";
+  document.getElementById("mission-add-role").value = "";
+  await refreshMissionMembers();
+});
+
+document.getElementById("logout-btn").addEventListener("click", async () => {
+  await fetch("/api/auth/logout", { method: "POST" });
+  location.reload();
+});
+
+document.getElementById("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById("login-error");
+  errorEl.textContent = "";
+  const body = {
+    cap_id: document.getElementById("login-cap-id").value.trim(),
+    password: document.getElementById("login-password").value,
+    totp_code: document.getElementById("login-totp").value.trim(),
+  };
+  const res = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    errorEl.textContent = "Invalid CAP ID, password, or authenticator code.";
+    return;
+  }
+  document.getElementById("login-password").value = "";
+  document.getElementById("login-totp").value = "";
+  await checkAuthAndInit();
+});
+
+async function checkAuthAndInit() {
+  const res = await fetch("/api/auth/me");
+  if (!res.ok) {
+    document.getElementById("login-overlay").hidden = false;
+    document.getElementById("user-badge").hidden = true;
+    return;
+  }
+  const me = await res.json();
+  currentUser = me.user;
+  currentMissions = me.missions;
+  document.getElementById("login-overlay").hidden = true;
+  document.getElementById("user-badge").hidden = false;
+  document.getElementById("user-badge-name").textContent = currentUser.display_name;
+  populateMissionSelect();
+  initTrackingData();
+}
+
+checkAuthAndInit();
