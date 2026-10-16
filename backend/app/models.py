@@ -255,6 +255,11 @@ class Sortie(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     aircraft_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("aircraft.id"), index=True)
+    # Added 2026-10-16 (per-user/per-mission work) -- nullable only because
+    # existing rows predate Mission as a real entity; the backfill script
+    # (scripts/backfill_legacy_mission.py) attaches them to a legacy Mission.
+    # New sorties should always set this going forward.
+    mission_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("missions.id"), index=True)
     sortie_number: Mapped[int | None] = mapped_column()
     # "Global variable for a given session" (Gerry) is a frontend convenience
     # (pre-fills new-sortie forms) -- stored per-sortie here so each record is
@@ -367,11 +372,15 @@ class SpecialUseAirspace(Base):
 
 
 class GisLayer(Base):
-    """One imported SHP/KML/KMZ/GeoJSON file (REQUIREMENTS.md 3.2)."""
+    """One imported SHP/KML/KMZ/GeoJSON file (REQUIREMENTS.md 3.2), already
+    called "Mission Layers" in the UI. mission_id (added 2026-10-16, nullable
+    for the same pre-Mission-entity reason as Sortie.mission_id above) makes
+    that UI label actually true at the data layer, not just in copy."""
 
     __tablename__ = "gis_layers"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
+    mission_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("missions.id"), index=True)
     name: Mapped[str] = mapped_column(String(100))
     source_format: Mapped[str] = mapped_column(String(20))
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -542,15 +551,22 @@ class MissionMembership(Base):
 
 
 class OperationsArea(Base):
-    """The single active Area of Operations (AO) -- REQUIREMENTS.md 3.1/3.2's
+    """A mission's active Area of Operations (AO) -- REQUIREMENTS.md 3.1/3.2's
     AO/AOI concept, promoted 2026-10-14 from pure-frontend (frontend/src/main.js's
     setOpsArea(), driven only by the locate+radius control) to a real backend
     concept so app/ingestion/ao_discovery_poller.py can geofence the fast
     discovery poll against it, and app/api/discovered.py can filter candidates by
-    it. Single row by design (the API layer upserts the one row rather than ever
-    inserting a second) -- not a per-mission table yet, matching the existing
-    locate+radius control's one-at-a-time semantics; a future per-mission AO is a
-    separate enhancement, not scoped here.
+    it. Per Gerry (2026-10-16): "An AO might be around a possible incident site
+    or might be a radius around an airfield for, say, a training exercise" --
+    "sites" and "AO" are the same concept, not two.
+
+    One row per mission (mission_id is unique) -- made per-mission 2026-10-16,
+    exactly the extension this table's original single-global-row design
+    anticipated. The API layer still upserts by mission_id rather than ever
+    inserting a second row for the same mission. mission_id is nullable only
+    because the already-live AO Gerry set before Mission existed predates it --
+    scripts/backfill_legacy_mission.py attaches that one orphan row to the new
+    legacy Mission; every AO set through the API from now on always has one.
 
     Plain lat/lon/radius floats, not a PostGIS Geometry -- the only consumer is a
     point-radius membership check (haversine, see
@@ -561,7 +577,32 @@ class OperationsArea(Base):
     __tablename__ = "operations_area"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
+    mission_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("missions.id"), unique=True, index=True)
     center_latitude: Mapped[float] = mapped_column(Float)
     center_longitude: Mapped[float] = mapped_column(Float)
     radius_nm: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class MissionAircraft(Base):
+    """Which aircraft are assigned to a given mission -- added 2026-10-16 per
+    Gerry's per-user/per-mission request. `Aircraft` itself stays the global
+    tail-number identity table it already was (ADS-B polling keeps working off
+    the full global roster, unchanged); this join table is what makes a
+    mission's roster/map/Ops Board display only ITS aircraft, not every tail
+    AvTrack has ever known about.
+
+    Also the landing spot for "add aircraft not originally on the list if they
+    come into the AO" (Gerry): approving a DiscoveredCallsign candidate
+    (app/api/discovered.py) creates a row here for the approving mission, in
+    addition to the global Aircraft/AircraftCallsign rows it already created."""
+
+    __tablename__ = "mission_aircraft"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    mission_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("missions.id"), index=True)
+    aircraft_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("aircraft.id"), index=True)
+    added_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("mission_id", "aircraft_id", name="uq_mission_aircraft"),)

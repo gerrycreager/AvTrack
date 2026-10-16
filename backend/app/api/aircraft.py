@@ -1,12 +1,14 @@
 import csv
 import io
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import optional_mission_member
 from app.db import get_session
-from app.models import Aircraft, AircraftCallsign
+from app.models import Aircraft, AircraftCallsign, MissionAircraft
 from app.schemas import AircraftOut, RosterUploadOut, TrackedListIn
 
 router = APIRouter(prefix="/api/aircraft", tags=["aircraft"])
@@ -17,10 +19,24 @@ COMMON_CAP_SUFFIXES = ("CP", "CA", "CV")
 
 
 @router.get("", response_model=list[AircraftOut])
-async def list_aircraft(session: AsyncSession = Depends(get_session)):
-    """All known aircraft (from the callsign/tail import). The side panel
-    (REQUIREMENTS.md 3.1) combines this with live positions client-side / via /ws."""
-    result = await session.execute(select(Aircraft).where(Aircraft.active.is_(True)))
+async def list_aircraft(
+    request: Request, mission_id: UUID | None = Query(None), session: AsyncSession = Depends(get_session)
+):
+    """This mission's assigned aircraft (via MissionAircraft) when mission_id
+    is given; the full global active roster when it's omitted -- the latter is
+    a transitional fallback for the current, pre-login frontend (added
+    2026-10-16, see app/auth.py's optional_mission_member) and should go away
+    once the frontend always sends mission_id. The side panel (REQUIREMENTS.md
+    3.1) combines this with live positions client-side / via /ws."""
+    await optional_mission_member(mission_id, request, session)
+    if mission_id is None:
+        result = await session.execute(select(Aircraft).where(Aircraft.active.is_(True)))
+        return result.scalars().all()
+    result = await session.execute(
+        select(Aircraft)
+        .join(MissionAircraft, MissionAircraft.aircraft_id == Aircraft.id)
+        .where(MissionAircraft.mission_id == mission_id, Aircraft.active.is_(True))
+    )
     return result.scalars().all()
 
 
@@ -52,14 +68,23 @@ async def resolve_tracked_list(body: TrackedListIn, session: AsyncSession = Depe
 
 
 @router.post("/roster", response_model=RosterUploadOut)
-async def upload_roster(file: UploadFile = File(...), session: AsyncSession = Depends(get_session)):
+async def upload_roster(
+    request: Request,
+    mission_id: UUID | None = Query(None),
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+):
     """Mission-specific callsign/tail roster upload (REQUIREMENTS.md 3.1, added
     2026-09-13) -- same CSV shape and upsert logic as scripts/import_callsign_tails.py
     (tail_number, callsign, callsign_prefix columns), but via the web UI instead of an
     SSH+CLI script run, and deliberately additive-only: unlike that script, this never
     deactivates aircraft missing from the upload. Per Gerry: "for now add/supplement...
-    we will eventually get a roster" -- a real mission-scoped roster concept (separate
-    from the standing monthly wing-wide list) is a future enhancement, not this.
+    we will eventually get a roster" -- that real mission-scoped roster concept (separate
+    from the standing monthly wing-wide list) is `mission_id`/MissionAircraft, added
+    2026-10-16: when given, every uploaded row is also linked into that mission's
+    roster, not just the global Aircraft table. Omitted, this is the original
+    global-only behavior (transitional fallback, see app/auth.py's
+    optional_mission_member).
 
     Also accepts an optional `pilot` or `instructor` column (either name -- per Gerry,
     2026-09-13, "build in the ability to read a column header with pilot (or
@@ -70,12 +95,18 @@ async def upload_roster(file: UploadFile = File(...), session: AsyncSession = De
     would have silently treated a differently-cased header as absent) and blank/absent
     values leave any existing default untouched rather than clearing it, matching this
     endpoint's overall additive-only philosophy."""
+    await optional_mission_member(mission_id, request, session)
     content = (await file.read()).decode("utf-8-sig")  # -sig: tolerate an Excel-exported BOM
     rows = [{(k or "").strip().lower(): v for k, v in row.items()} for row in csv.DictReader(io.StringIO(content))]
 
     unusual_suffix_tails: list[str] = []
     existing = {a.tail_number: a for a in (await session.execute(select(Aircraft))).scalars()}
     existing_callsigns = {c.callsign: c for c in (await session.execute(select(AircraftCallsign))).scalars()}
+    existing_links = (
+        {m.aircraft_id for m in (await session.execute(select(MissionAircraft).where(MissionAircraft.mission_id == mission_id))).scalars()}
+        if mission_id is not None
+        else set()
+    )
 
     for row in rows:
         tail = (row.get("tail_number") or "").strip().upper()
@@ -88,6 +119,10 @@ async def upload_roster(file: UploadFile = File(...), session: AsyncSession = De
             aircraft = Aircraft(tail_number=tail)
             session.add(aircraft)
             existing[tail] = aircraft
+            await session.flush()  # need aircraft.id before linking it into the mission below
+        if mission_id is not None and aircraft.id not in existing_links:
+            session.add(MissionAircraft(mission_id=mission_id, aircraft_id=aircraft.id))
+            existing_links.add(aircraft.id)
         callsign = (row.get("callsign") or "").strip().upper() or None
         aircraft.callsign = callsign
         aircraft.callsign_prefix = (row.get("callsign_prefix") or "").strip().upper() or None

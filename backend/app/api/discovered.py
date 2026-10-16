@@ -7,18 +7,30 @@ Kept as its own resource (not folded into api/aircraft.py) since DiscoveredCalls
 is a distinct candidate-list with its own list/approve/dismiss lifecycle, even
 though approve writes into Aircraft -- same reasoning as keeping airfields.py
 separate from airspace.py despite both being geo-data.
+
+Mission-scoped as of 2026-10-16 (per-user/per-mission work, added per Gerry:
+"different missions... different Areas of Operation") -- OperationsArea is now
+one row per mission, and approving a candidate links it into the approving
+mission's roster (MissionAircraft), not just the global Aircraft table.
+`mission_id` is an OPTIONAL query param on every route here: omit it and you
+get the exact pre-2026-10-16 global/single-AO behavior, so this can ship ahead
+of the frontend actually sending it without breaking Gerry's live usage in the
+meantime -- see app/auth.py's optional_mission_member docstring. Once the
+frontend always sends it, mission_id should become required and that fallback
+removed.
 """
 
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import optional_mission_member
 from app.db import get_session
 from app.integrations.adsb_discovery import haversine_nm
-from app.models import Aircraft, AircraftCallsign, DiscoveredCallsign, OperationsArea
+from app.models import Aircraft, AircraftCallsign, DiscoveredCallsign, MissionAircraft, OperationsArea
 from app.schemas import AircraftOut, DiscoveredCallsignOut, OperationsAreaIn, OperationsAreaOut
 
 router = APIRouter(prefix="/api/discovered", tags=["discovered"])
@@ -26,6 +38,8 @@ router = APIRouter(prefix="/api/discovered", tags=["discovered"])
 
 @router.get("", response_model=list[DiscoveredCallsignOut])
 async def list_discovered(
+    request: Request,
+    mission_id: UUID | None = Query(None),
     ao_filter: bool = Query(True, description="If false, ignore the AO and return all non-dismissed candidates nationwide"),
     session: AsyncSession = Depends(get_session),
 ):
@@ -40,10 +54,13 @@ async def list_discovered(
     operations table." General map situational awareness is unscoped; only the
     Ops Board's actionable alert list (the default, AO-scoped behavior here)
     is operation-specific."""
+    await optional_mission_member(mission_id, request, session)
     rows = (await session.execute(select(DiscoveredCallsign).where(DiscoveredCallsign.dismissed_at.is_(None)))).scalars().all()
     if not ao_filter:
         return rows
-    ao = (await session.execute(select(OperationsArea))).scalars().first()
+    ao_query = select(OperationsArea)
+    ao_query = ao_query.where(OperationsArea.mission_id == mission_id) if mission_id is not None else ao_query
+    ao = (await session.execute(ao_query)).scalars().first()
     if ao is None:
         return rows
     return [
@@ -56,12 +73,21 @@ async def list_discovered(
 
 
 @router.post("/{discovered_id}/approve", response_model=AircraftOut)
-async def approve_discovered(discovered_id: UUID, session: AsyncSession = Depends(get_session)):
+async def approve_discovered(
+    discovered_id: UUID,
+    request: Request,
+    mission_id: UUID | None = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
     """One click, no form: tail_number + callsign only, mirroring api/aircraft.py's
     roster-upload minimal-data pattern. Sets AircraftCallsign.label from
     source_label (CAP or PARD) -- see Aircraft's docstring on why a tail can
     answer to more than one callsign (a PARD tasking is a callsign change on the
-    same tail, not a different aircraft)."""
+    same tail, not a different aircraft). When mission_id is given, also links
+    the aircraft into that mission's roster (MissionAircraft) -- this is the
+    "add aircraft not originally on the list if they come into the AO" case
+    Gerry asked for."""
+    user = await optional_mission_member(mission_id, request, session)
     row = await session.get(DiscoveredCallsign, discovered_id)
     if row is None:
         raise HTTPException(404, "Discovered candidate not found")
@@ -82,6 +108,17 @@ async def approve_discovered(discovered_id: UUID, session: AsyncSession = Depend
     cs.aircraft_id = aircraft.id
     cs.label = row.source_label
 
+    if mission_id is not None:
+        existing_link = (
+            await session.execute(
+                select(MissionAircraft).where(
+                    MissionAircraft.mission_id == mission_id, MissionAircraft.aircraft_id == aircraft.id
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_link is None:
+            session.add(MissionAircraft(mission_id=mission_id, aircraft_id=aircraft.id, added_by=user.id if user else None))
+
     row.dismissed_at = datetime.now(timezone.utc)  # approved rows also leave the alert list
 
     await session.commit()
@@ -90,7 +127,10 @@ async def approve_discovered(discovered_id: UUID, session: AsyncSession = Depend
 
 
 @router.post("/{discovered_id}/dismiss")
-async def dismiss_discovered(discovered_id: UUID, session: AsyncSession = Depends(get_session)):
+async def dismiss_discovered(
+    discovered_id: UUID, request: Request, mission_id: UUID | None = Query(None), session: AsyncSession = Depends(get_session)
+):
+    await optional_mission_member(mission_id, request, session)
     row = await session.get(DiscoveredCallsign, discovered_id)
     if row is None:
         raise HTTPException(404, "Discovered candidate not found")
@@ -100,17 +140,28 @@ async def dismiss_discovered(discovered_id: UUID, session: AsyncSession = Depend
 
 
 @router.get("/ao", response_model=OperationsAreaOut | None)
-async def get_ao(session: AsyncSession = Depends(get_session)):
-    return (await session.execute(select(OperationsArea))).scalars().first()
+async def get_ao(request: Request, mission_id: UUID | None = Query(None), session: AsyncSession = Depends(get_session)):
+    await optional_mission_member(mission_id, request, session)
+    query = select(OperationsArea)
+    query = query.where(OperationsArea.mission_id == mission_id) if mission_id is not None else query
+    return (await session.execute(query)).scalars().first()
 
 
 @router.put("/ao", response_model=OperationsAreaOut)
-async def set_ao(body: OperationsAreaIn, session: AsyncSession = Depends(get_session)):
-    """Single active AO -- replaces any existing row (upsert-by-replace, not a
-    per-mission list yet -- see OperationsArea's docstring)."""
-    ao = (await session.execute(select(OperationsArea))).scalars().first()
+async def set_ao(
+    body: OperationsAreaIn, request: Request, mission_id: UUID | None = Query(None), session: AsyncSession = Depends(get_session)
+):
+    """One AO per mission -- replaces any existing row for that mission
+    (upsert-by-replace). With mission_id omitted, falls back to the original
+    single-global-row behavior (matches whichever row the global, pre-mission
+    AO already used) -- see module docstring."""
+    await optional_mission_member(mission_id, request, session)
+    query = select(OperationsArea)
+    query = query.where(OperationsArea.mission_id == mission_id) if mission_id is not None else query
+    ao = (await session.execute(query)).scalars().first()
     if ao is None:
         ao = OperationsArea(
+            mission_id=mission_id,
             center_latitude=body.center_latitude,
             center_longitude=body.center_longitude,
             radius_nm=body.radius_nm,

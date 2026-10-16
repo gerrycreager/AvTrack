@@ -1435,6 +1435,91 @@ follow the NIMS taskbook."
 ### 3.6 Reliability / Data Management
 - Routine, automated database backups (flight data is the thing that must not be lost).
 
+### 3.7 Per-User / Per-Mission Accounts (added 2026-10-16)
+
+AvTrack started single-tenant/no-login: one shared aircraft roster, one global
+Area of Operations (AO), one shared pool of sorties/events, visible identically to
+anyone who could reach the box. Per Gerry: *"We started with tracking, added the
+concept of communications. Now it's becoming obvious that assisting Civil Air
+Patrol incident management team members, specifically Air Operations Branch and
+Operation Section, as well as communications will be useful. All those groups
+need to be able to see a particular mission(s) so there is a common operating
+picture for air operations."* One person may be on several missions at once, each
+with its own aircraft and AO.
+
+**Decisions (resolves open question 7 below):**
+- **Auth**: standalone AvTrack accounts (not CAP eServices SSO, at least for
+  Phase 1), behind a swappable `app/auth.py` layer so an SSO adapter can replace
+  just that module later without reworking every route. Login identity is **CAP
+  ID**, not email (no email column/infra exists). MFA is required: CAP ID +
+  password + a TOTP authenticator-app code — Gerry's explicit choice over
+  email/SMS one-time codes, since this app has no outbound mail/SMS
+  infrastructure to build either on. No self-service signup: accounts are
+  provisioned by `scripts/create_user.py` (prints a scannable enrollment QR
+  code), matching this project's existing one-off-admin-script pattern.
+- **`Mission` is a real, first-class entity** (not just the free-text
+  `Sortie.mission_number` string), with `MissionMembership` recording who's on
+  it. Per Gerry: *"Any of those four areas can set up a Mission... and can add
+  aircraft not originally on the list if they come into the AO"* — any logged-in
+  user can create a mission and add members (by CAP ID), no role restricts
+  either action.
+- **Role is descriptive only, never a permission gate.** There's a real
+  hierarchy (IC > Ops > AOBD > COMMS), but per Gerry: *"each and every one of
+  those could be entering data to track aircraft."* A role tag is stored per
+  person-per-mission for display, but authorization is binary — membership in
+  the mission, nothing finer-grained.
+- **"Sites" and "Area of Operations" are the same concept.** Per Gerry: *"An AO
+  might be around a possible incident site or might be a radius around an
+  airfield for, say, a training exercise. Define by location/radius using MGRS
+  or lat/lon, or GARS."* No separate "sites" entity — the existing center+radius
+  `OperationsArea` (3.1/3.2) becomes per-mission, with GARS added as a third way
+  to specify its center alongside the existing lat/lon and MGRS support.
+- Full design/rollout plan: `/home/gerry/.claude/plans/distributed-humming-sprout.md`.
+
+**Shipped (2026-10-16, backend-only, phase 1 of the rollout plan — no frontend
+change yet, no behavior change for Gerry's existing anonymous usage):** `User`/
+`UserSession`/`Mission`/`MissionMembership` tables; `app/auth.py`
+(`get_current_user`/`require_mission_member`, bcrypt password hashing, TOTP
+verification, opaque DB-backed session tokens — no JWT/secret-key to manage);
+`POST /api/auth/login` (CAP ID + password + TOTP code → session cookie),
+`/logout`, `/me`, `/change-password`; `POST /api/missions` (create, creator
+auto-joins), `GET /api/missions/mine`, `GET`/`POST /api/missions/{id}/members`.
+Verified live via curl: full login/MFA-reject/logout cycle, mission creation,
+membership listing, a 404 adding an unknown CAP ID, and a 403 for a non-member
+hitting another mission's members endpoint.
+
+**Shipped (2026-10-16, phase 2):** `OperationsArea` is now one row per mission
+(was one global row); a new `MissionAircraft` join table scopes which aircraft
+belong to which mission (`Aircraft` itself stays the global tail-number
+identity table — ADS-B polling is unaffected). `GET/POST /api/aircraft`,
+`GET/PUT /api/discovered/ao`, and `GET/POST /api/discovered/{id}/approve|dismiss`
+all take an **optional** `mission_id` query param: omitted, they behave exactly
+as before (global/single-AO); given, they're mission-scoped and require
+membership (`app/auth.py`'s `optional_mission_member`). This optional-param
+design is deliberate and transitional — it lets the backend ship ahead of the
+frontend (phase 3) without an outage in between; `mission_id` should become
+required and the fallback branch deleted once the frontend always sends it.
+Approving a discovered candidate into a mission now also links it into that
+mission's `MissionAircraft` roster, not just the global `Aircraft` table —
+exactly the "add aircraft not originally on the list if they come into the AO"
+case. `Sortie`/`GisLayer` gained a nullable `mission_id` column (schema only,
+for the future backfill) but are **not yet** filtered/required by their APIs —
+deliberately deferred to a later pass to keep this phase's scope to the two
+things Gerry specifically called out (aircraft, AO); the Ops Board and sortie
+tracking remain global for now. Verified live via curl: two test missions with
+independent AOs that don't clobber each other, independent aircraft rosters
+(a roster upload into one mission invisible to another), and an
+approve-into-mission that only affects the approving mission's roster.
+
+**Not yet done (phases 3-4 of the rollout plan):** no route yet *requires*
+login — that lands with the frontend login gate so existing usage doesn't
+break mid-rollout. The actual legacy-data backfill (attaching Gerry's
+currently-live aircraft/AO to a real "legacy" Mission) is also pending: it
+needs Gerry's own account to exist first, and per standing security practice
+here, Claude doesn't set a human's password — Gerry needs to run
+`scripts/create_user.py <his CAP ID> "Gerry Creager"` himself. GARS coordinate
+parsing (for AO-center entry) is not yet built.
+
 ## 4. UX Philosophy (per Gerry, 2026-09-13)
 
 - Start with **broad, varied selection options** exposed directly in the UI rather
@@ -1659,10 +1744,10 @@ architecture (especially the Phase 2 server/pub-sub layer) is locked in:
    PostGIS, a self-hostable pub/sub broker rather than a provider-managed pub/sub
    service) so the same stack runs on AWS, Azure, GCP, or on-prem/shop hardware
    without a rewrite. Revisit only if CAP/IT states a hard constraint.
-7. **Auth/identity**: does client login tie into an existing CAP identity system
-   (eServices SSO) or is AvTrack its own user store, at least for Phase 1? Leaning
-   toward a pluggable auth layer (standalone accounts for Phase 1, SSO adapter later)
-   to match the infra-agnostic approach above — confirm.
+7. **Auth/identity — DECIDED (2026-10-16)**: standalone AvTrack accounts for
+   Phase 1 (CAP ID + password + TOTP MFA, not CAP eServices SSO), behind a
+   swappable layer so an SSO adapter can replace it later without reworking
+   every route — see 3.7 for the full decision and what's shipped so far.
 8. **Cross-platform client toolkit (Phase 2)**: e.g. Electron/Tauri (web-tech reuse
    from Phase 1) vs. a native-per-platform approach. Tauri would let you reuse a lot
    of the Phase 1 web frontend and keeps the client lightweight, matching the

@@ -15,6 +15,7 @@ usable cookie value.
 
 import hashlib
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -113,3 +114,31 @@ def require_mission_member(mission_id_param: str = "mission_id"):
         return user
 
     return _dep
+
+
+async def optional_mission_member(
+    mission_id: uuid.UUID | None, request: Request, session: AsyncSession
+) -> User | None:
+    """Transitional helper for mission-scoping an endpoint without breaking it
+    for the current, pre-login frontend (added 2026-10-16, phase 2 of the
+    per-user/per-mission rollout -- see
+    /home/gerry/.claude/plans/distributed-humming-sprout.md). When mission_id
+    is omitted, this is a no-op (None, no auth check) and the caller should run
+    its existing, unscoped query exactly as before. Once the frontend always
+    sends mission_id (that plan's phase 3), every caller should become
+    required and this fallback branch should be deleted -- it exists only to
+    let the schema/API land ahead of the frontend without an outage in
+    between."""
+    if mission_id is None:
+        return None
+    user = await get_current_user(request, session)
+    membership = (
+        await session.execute(
+            select(MissionMembership).where(
+                MissionMembership.mission_id == mission_id, MissionMembership.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(403, "Not a member of this mission")
+    return user
