@@ -1542,6 +1542,24 @@ predated Mission as a real entity: the 30 active aircraft (all of them --
 there was no pre-existing OperationsArea row to attach, confirmed empty
 earlier) and all 7 existing Sortie rows.
 
+**Shipped (2026-10-16, Sortie/Ops Board scoping)**: `POST/GET /api/aircraft/{tail}/sorties`,
+`GET .../sorties/current`, and `GET /api/ops-board` all take the same optional
+`mission_id` pattern as phase 2 -- given, a tail's "current sortie" and the Ops
+Board are scoped to that one mission (the actual point: a tail flying for
+Mission A no longer looks "in progress" or shows up on the board to someone
+on Mission B); omitted, unchanged cross-mission behavior. Creating a sortie
+with a mission_id now also defaults `mission_number` from `Mission.mission_number`
+when the caller didn't type one in (still independently editable after, same
+as before). Also closed REQUIREMENTS.md open question 7's other loose end:
+every `logged_by`/`edited_by` field the frontend sends was hardcoded to the
+literal string `"gerry"` -- now `currentUser.display_name` via a
+`loggedByName()` helper, so a second person logging in doesn't get
+misattributed to Gerry. Verified live via curl and Playwright: a sortie
+created under one test mission showed on that mission's Ops Board with the
+right mission number, was absent from a second mission's board, and
+`sorties/current` correctly returned null for the second mission while
+showing in-progress for the first.
+
 **Not yet done (phase 4):** GARS coordinate parsing (for AO-center entry) is
 not yet built. The
 `optional_mission_member`/`mission_id`-omitted fallback paths added in

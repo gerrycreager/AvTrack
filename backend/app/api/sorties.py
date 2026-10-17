@@ -11,15 +11,17 @@ safety-critical the way a timestamp is.
 """
 
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 import mgrs
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.events import _effective_time, _get_aircraft_or_404, _to_event_out
+from app.auth import optional_mission_member
 from app.db import get_session
-from app.models import DetectionMethod, EventType, Sortie, SortieWaypoint, TrackingEvent, WaypointLocationMethod
+from app.models import DetectionMethod, EventType, Mission, Sortie, SortieWaypoint, TrackingEvent, WaypointLocationMethod
 from app.schemas import SortieCreateIn, SortieOut, SortiePatchIn, SortieStopIn, WaypointCreateIn, WaypointOut
 
 router = APIRouter(tags=["sorties"])
@@ -117,7 +119,20 @@ def _resolve_location(method: WaypointLocationMethod, raw_input: str, lat: float
 
 
 @router.post("/api/aircraft/{tail_number}/sorties", response_model=SortieOut)
-async def create_sortie(tail_number: str, body: SortieCreateIn, session: AsyncSession = Depends(get_session)):
+async def create_sortie(
+    tail_number: str,
+    body: SortieCreateIn,
+    request: Request,
+    mission_id: UUID | None = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """mission_id is OPTIONAL (transitional -- see app/auth.py's
+    optional_mission_member) so this ships ahead of every caller always
+    sending it. When given, the new sortie is tagged with it, and
+    mission_number defaults from Mission.mission_number when the caller
+    didn't type one in -- still independently editable afterward, same as
+    before."""
+    await optional_mission_member(mission_id, request, session)
     aircraft = await _get_aircraft_or_404(tail_number, session)
     start_event = TrackingEvent(
         aircraft_id=aircraft.id,
@@ -129,10 +144,16 @@ async def create_sortie(tail_number: str, body: SortieCreateIn, session: AsyncSe
     session.add(start_event)
     await session.flush()  # need start_event.id before referencing it
 
+    mission_number = body.mission_number
+    if not mission_number and mission_id is not None:
+        mission = await session.get(Mission, mission_id)
+        mission_number = mission.mission_number if mission else None
+
     sortie = Sortie(
         aircraft_id=aircraft.id,
+        mission_id=mission_id,
         sortie_number=body.sortie_number,
-        mission_number=body.mission_number,
+        mission_number=mission_number,
         pic_name=body.pic_name,
         engine_start_event_id=start_event.id,
         ete_hours=body.ete_hours,
@@ -148,25 +169,48 @@ async def create_sortie(tail_number: str, body: SortieCreateIn, session: AsyncSe
 
 
 @router.get("/api/aircraft/{tail_number}/sorties", response_model=list[SortieOut])
-async def list_sorties(tail_number: str, session: AsyncSession = Depends(get_session)):
+async def list_sorties(
+    tail_number: str,
+    request: Request,
+    mission_id: UUID | None = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Filtered to this mission's own sorties for this tail when mission_id is
+    given; every sortie ever logged for this tail (across missions) when
+    omitted -- the latter is the pre-mission-scoping behavior, kept as a
+    transitional fallback (see app/auth.py's optional_mission_member)."""
+    await optional_mission_member(mission_id, request, session)
     aircraft = await _get_aircraft_or_404(tail_number, session)
-    result = await session.execute(
-        select(Sortie).where(Sortie.aircraft_id == aircraft.id).order_by(Sortie.created_at.desc()).limit(20)
-    )
+    query = select(Sortie).where(Sortie.aircraft_id == aircraft.id)
+    if mission_id is not None:
+        query = query.where(Sortie.mission_id == mission_id)
+    result = await session.execute(query.order_by(Sortie.created_at.desc()).limit(20))
     sorties = result.scalars().unique().all()
     return [_to_sortie_out(s) for s in sorties]
 
 
 @router.get("/api/aircraft/{tail_number}/sorties/current", response_model=SortieOut | None)
-async def current_sortie(tail_number: str, session: AsyncSession = Depends(get_session)):
+async def current_sortie(
+    tail_number: str,
+    request: Request,
+    mission_id: UUID | None = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
     """The aircraft's most recent sortie, if it's still in progress (no engine stop
     logged yet) -- drives the frontend's choice between "Start Sortie" and the
     in-progress sortie panel. Returns null (not 404) when there's no open sortie,
-    since "nothing in progress" is a normal, expected state here."""
+    since "nothing in progress" is a normal, expected state here.
+
+    When mission_id is given, only considers THAT mission's sorties for this
+    tail -- a tail flying for a different mission shouldn't look "in progress"
+    to a caller who isn't on it. Omitted, this is the original cross-mission
+    behavior (transitional fallback)."""
+    await optional_mission_member(mission_id, request, session)
     aircraft = await _get_aircraft_or_404(tail_number, session)
-    result = await session.execute(
-        select(Sortie).where(Sortie.aircraft_id == aircraft.id).order_by(Sortie.created_at.desc()).limit(1)
-    )
+    query = select(Sortie).where(Sortie.aircraft_id == aircraft.id)
+    if mission_id is not None:
+        query = query.where(Sortie.mission_id == mission_id)
+    result = await session.execute(query.order_by(Sortie.created_at.desc()).limit(1))
     sortie = result.scalar_one_or_none()
     if sortie is None or sortie.engine_stop_event_id is not None:
         return None

@@ -36,13 +36,15 @@ on its own no longer triggers strong alerting):
 """
 
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.events import _effective_time
 from app.api.sorties import _compute_eta_utc
+from app.auth import optional_mission_member
 from app.config import settings
 from app.db import get_session
 from app.models import Aircraft, Position, Sortie
@@ -53,18 +55,28 @@ router = APIRouter(tags=["ops-board"])
 
 @router.get("/api/ops-board", response_model=OpsBoardOut)
 async def get_ops_board(
+    request: Request,
     hours: int = Query(24, description="Include sorties started within this many hours"),
+    mission_id: UUID | None = Query(None),
     session: AsyncSession = Depends(get_session),
 ):
+    """Board rows for sorties within the time window. Filtered to one
+    mission's sorties when mission_id is given (the actual point of this
+    scoping -- so one mission's IC/AOBD doesn't see every other mission's
+    board rows); every sortie in the window regardless of mission when
+    omitted (transitional fallback, see app/auth.py's optional_mission_member)."""
+    await optional_mission_member(mission_id, request, session)
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=hours)
 
-    result = await session.execute(
+    query = (
         select(Sortie, Aircraft)
         .join(Aircraft, Aircraft.id == Sortie.aircraft_id)
         .where(Sortie.created_at >= cutoff)
-        .order_by(Sortie.created_at.desc())
     )
+    if mission_id is not None:
+        query = query.where(Sortie.mission_id == mission_id)
+    result = await session.execute(query.order_by(Sortie.created_at.desc()))
     sorties_with_aircraft = result.all()
 
     aircraft_ids = {aircraft.id for _, aircraft in sorties_with_aircraft}

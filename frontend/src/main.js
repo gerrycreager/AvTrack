@@ -121,6 +121,21 @@ function withMissionParam(url) {
   return url.includes("?") ? `${url}&${qp}` : `${url}?${qp}`;
 }
 
+// Real identity now exists (replaces the "gerry" placeholders REQUIREMENTS.md
+// open question 7 flagged) -- falls back to "unknown" only if somehow called
+// before login completes, matching the backend schema's own default.
+function loggedByName() {
+  return currentUser ? currentUser.display_name : "unknown";
+}
+
+// The active mission's own mission_number (YY-X-NNNN), if it has one -- takes
+// priority over the free-text "Session Mission #" convenience field when
+// pre-filling Start Sortie, now that Mission is a real backend entity.
+function activeMissionNumber() {
+  const mission = currentMissions.find((m) => m.id === currentMissionId);
+  return mission?.mission_number || null;
+}
+
 // True once the map's initial style load has completed. Deliberately NOT
 // map.isStyleLoaded() -- found live 2026-09-13 (Gerry: "I looked and didn't see the
 // MGRS box either"): that method tracks whether all currently-visible *tiles* have
@@ -1420,7 +1435,7 @@ async function refreshSortieInfo(tailNumber) {
   const container = document.getElementById("sortie-info");
   container.innerHTML = "<em>Loading…</em>";
   try {
-    const res = await fetch(`/api/aircraft/${tailNumber}/sorties/current`);
+    const res = await fetch(withMissionParam(`/api/aircraft/${tailNumber}/sorties/current`));
     const sortie = await res.json(); // null if no sortie in progress
     if (sortie) {
       renderInProgressSortie(tailNumber, sortie);
@@ -1436,7 +1451,7 @@ async function refreshSortieInfo(tailNumber) {
 
 function renderStartSortieForm(tailNumber) {
   const container = document.getElementById("sortie-info");
-  const savedMissionNumber = localStorage.getItem(MISSION_NUMBER_KEY) ?? "";
+  const savedMissionNumber = activeMissionNumber() ?? localStorage.getItem(MISSION_NUMBER_KEY) ?? "";
   // Roster-upload default (optional pilot/instructor column), not a per-session
   // memory like mission number -- each tail can have its own default PIC.
   const defaultPic = defaultPicByTail.get(tailNumber) ?? "";
@@ -1460,7 +1475,7 @@ function renderStartSortieForm(tailNumber) {
     const assignedArea = document.getElementById("new-assigned-area").value.trim();
     const eteHours = document.getElementById("new-ete-hours").value;
     if (missionNumber) localStorage.setItem(MISSION_NUMBER_KEY, missionNumber);
-    await fetch(`/api/aircraft/${tailNumber}/sorties`, {
+    await fetch(withMissionParam(`/api/aircraft/${tailNumber}/sorties`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1470,7 +1485,7 @@ function renderStartSortieForm(tailNumber) {
         assigned_area: assignedArea || null,
         ete_hours: eteHours ? parseFloat(eteHours) : null,
         engine_start_utc: readTimeEntryField("new-engine-start"),
-        logged_by: "gerry",
+        logged_by: loggedByName(),
       }),
     });
     await refreshSortieInfo(tailNumber);
@@ -1490,7 +1505,7 @@ async function renderRecentSorties(tailNumber) {
   if (!container) return;
   container.innerHTML = "<em>Loading…</em>";
   try {
-    const res = await fetch(`/api/aircraft/${tailNumber}/sorties`);
+    const res = await fetch(withMissionParam(`/api/aircraft/${tailNumber}/sorties`));
     const sorties = (await res.json()).filter((s) => s.engine_stop_utc); // in-progress one (if any) is shown above instead
     if (sorties.length === 0) {
       container.innerHTML = "<em>No completed sorties yet.</em>";
@@ -1613,7 +1628,7 @@ function renderInProgressSortie(tailNumber, sortie) {
     await fetch(`/api/sorties/${sortie.id}/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ engine_stop_utc: readTimeEntryField("stop-engine"), logged_by: "gerry" }),
+      body: JSON.stringify({ engine_stop_utc: readTimeEntryField("stop-engine"), logged_by: loggedByName() }),
     });
     await refreshSortieInfo(tailNumber);
     await refreshSortieEvents(tailNumber);
@@ -1671,7 +1686,7 @@ async function addWaypoint(tailNumber, sortieId) {
     latitude: lat ? parseFloat(lat) : null,
     longitude: lon ? parseFloat(lon) : null,
     time_utc: readTimeEntryField("wp"),
-    logged_by: "gerry",
+    logged_by: loggedByName(),
   };
   if (waypointType === "ops_check") {
     const altitude = document.getElementById("wp-altitude").value;
@@ -1726,7 +1741,7 @@ async function refreshSortieEvents(tailNumber) {
         await fetch(`/api/events/${ev.id}/edits`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ field_name: "event_time_utc", new_value: newUtc, edited_by: "gerry" }),
+          body: JSON.stringify({ field_name: "event_time_utc", new_value: newUtc, edited_by: loggedByName() }),
         });
         refreshSortieEvents(tailNumber);
       });
@@ -1745,7 +1760,7 @@ async function logEvent(tailNumber, eventType, eventTimeUtc = null) {
     body: JSON.stringify({
       event_type: eventType,
       event_time_utc: eventTimeUtc, // null = server-now, same as before this field existed
-      logged_by: "gerry", // hardcoded until auth exists (REQUIREMENTS.md open question 7)
+      logged_by: loggedByName(),
     }),
   });
   refreshSortieEvents(tailNumber);
@@ -1780,7 +1795,7 @@ const OPS_BOARD_STATE_LABEL = {
 async function refreshOpsBoard() {
   try {
     const [boardRes, discoveredRes] = await Promise.all([
-      fetch("/api/ops-board?hours=24"),
+      fetch(withMissionParam("/api/ops-board?hours=24")),
       fetch(withMissionParam("/api/discovered")),
     ]);
     const { rows, generated_at } = await boardRes.json();
