@@ -200,6 +200,20 @@ is reusable as the Phase 2 server's schema — not thrown away.
   back down from 45 to 5 (≈10x the refresh cadence) — the earlier fade/
   "Last seen Xm ago" UI from the previous fix is unchanged, it's just acting
   on much more accurate data now.
+  **`known_tails` dedup bug, found and fixed 2026-10-18**: `upsert_matches()`
+  in `adsb_discovery.py` (shared by both pollers above) built its "already a
+  real Aircraft" skip-list from every `Aircraft.tail_number` regardless of
+  `active`, so any tail already present as one of the ~549 `active=False`
+  bulk-seeded nationwide reference rows was silently excluded from
+  `discovered_callsigns` even while actively flying with a matching CAP/PARD
+  callsign — confirmed live with N817CP/CAP3531 near Tulsa, OK, a real flight
+  that never appeared as a candidate. Fixed by scoping that query to
+  `Aircraft.active.is_(True)`; an inactive tail is now treated exactly like a
+  brand-new unknown one, so it gets a `DiscoveredCallsign` row again. No
+  change needed in `approve_discovered()` (`app/api/discovered.py`) — it
+  already set `aircraft.active = True` on an existing-but-inactive match, so
+  approving one of these now-surfaced candidates correctly restores
+  visibility.
 - **Climb/descent indicator — shipped 2026-09-13**: a ▲/▼ caret next to the altitude
   figure (datablock and side panel both), ATC-datablock-style. Computed in
   `app/ingestion/poller.py` from consecutive real position deltas (altitude change

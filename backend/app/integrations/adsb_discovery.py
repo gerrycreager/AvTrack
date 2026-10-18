@@ -86,14 +86,27 @@ def extract_matches(aircraft_list: list[dict]) -> list[dict]:
 
 
 async def upsert_matches(matches: list[dict]) -> int:
-    """Upserts into discovered_callsigns, skipping any tail already a real
-    Aircraft row. Never clears dismissed_at on a re-sighting -- see
+    """Upserts into discovered_callsigns, skipping any tail already a real,
+    *active* Aircraft row. Never clears dismissed_at on a re-sighting -- see
     DiscoveredCallsign's docstring for why a dismissed candidate must stay
-    dismissed through further sightings."""
+    dismissed through further sightings.
+
+    Deliberately scoped to active=True (fixed 2026-10-18): the Aircraft table
+    also holds ~549 active=False rows from a bulk-seeded nationwide CAP
+    tail/callsign reference list. Treating those as "already known" silently
+    hid real, currently-flying CAP aircraft (confirmed live: N817CP / CAP3531
+    near Tulsa OK) from the discovery-candidates list, since an inactive tail
+    was never offered for approval and never polled by the tracked-map poller
+    either. An inactive-but-matched tail is now treated the same as a brand-new
+    unknown tail -- it gets a DiscoveredCallsign row so a human can approve it,
+    which (see app/api/discovered.py's approve_discovered) flips Aircraft.active
+    back to True."""
     if not matches:
         return 0
     async with SessionLocal() as session:
-        known_tails = set((await session.execute(select(Aircraft.tail_number))).scalars())
+        known_tails = set(
+            (await session.execute(select(Aircraft.tail_number).where(Aircraft.active.is_(True)))).scalars()
+        )
         new_count = 0
         for m in matches:
             tail = m["tail"]
