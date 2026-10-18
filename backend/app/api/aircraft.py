@@ -2,13 +2,14 @@ import csv
 import io
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import optional_mission_member
+from app.auth import optional_mission_member, require_mission_member
 from app.db import get_session
-from app.models import Aircraft, AircraftCallsign, MissionAircraft
+from app.integrations.wing_lookup import wing_hint_for_callsign
+from app.models import Aircraft, AircraftCallsign, MissionAircraft, User
 from app.schemas import AircraftOut, RosterUploadOut, TrackedListIn
 
 router = APIRouter(prefix="/api/aircraft", tags=["aircraft"])
@@ -31,13 +32,20 @@ async def list_aircraft(
     await optional_mission_member(mission_id, request, session)
     if mission_id is None:
         result = await session.execute(select(Aircraft).where(Aircraft.active.is_(True)))
-        return result.scalars().all()
-    result = await session.execute(
-        select(Aircraft)
-        .join(MissionAircraft, MissionAircraft.aircraft_id == Aircraft.id)
-        .where(MissionAircraft.mission_id == mission_id, Aircraft.active.is_(True))
-    )
-    return result.scalars().all()
+        rows = result.scalars().all()
+    else:
+        result = await session.execute(
+            select(Aircraft)
+            .join(MissionAircraft, MissionAircraft.aircraft_id == Aircraft.id)
+            .where(MissionAircraft.mission_id == mission_id, Aircraft.active.is_(True))
+        )
+        rows = result.scalars().all()
+    # Display-only wing-name hint (app/integrations/wing_lookup.py, added
+    # 2026-10-18) -- set as a plain attribute on each ORM row, not a DB
+    # column; AircraftOut.wing_hint picks it up via from_attributes.
+    for a in rows:
+        a.wing_hint = wing_hint_for_callsign(a.callsign)
+    return rows
 
 
 @router.post("/resolve", response_model=list[AircraftOut])
@@ -143,3 +151,33 @@ async def upload_roster(
 
     await session.commit()
     return RosterUploadOut(added_or_updated=len(rows), unusual_suffix_tails=sorted(set(unusual_suffix_tails)))
+
+
+@router.delete("/{aircraft_id}")
+async def remove_aircraft_from_mission(
+    aircraft_id: UUID,
+    mission_id: UUID = Query(...),
+    user: User = Depends(require_mission_member()),
+    session: AsyncSession = Depends(get_session),
+):
+    """Remove an aircraft from ONE mission's roster (item 3, 2026-10-18 plan).
+    `mission_id` is REQUIRED here, not optional -- there's no "remove from
+    everything" meaning to preserve. This deletes only the MissionAircraft
+    link row (the existing uq_mission_aircraft unique constraint guarantees
+    at most one match) -- it must NEVER touch Aircraft.active or the Aircraft
+    row's existence. Per Gerry: "we don't eliminate an aircraft from the
+    database, we take it off a mission" -- the global Aircraft identity/
+    roster stays driven solely by the authoritative monthly NHQ CSV
+    (scripts/import_callsign_tails.py), never by this action."""
+    link = (
+        await session.execute(
+            select(MissionAircraft).where(
+                MissionAircraft.mission_id == mission_id, MissionAircraft.aircraft_id == aircraft_id
+            )
+        )
+    ).scalar_one_or_none()
+    if link is None:
+        raise HTTPException(404, "Aircraft is not linked to this mission")
+    await session.delete(link)
+    await session.commit()
+    return {"status": "ok"}

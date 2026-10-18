@@ -106,14 +106,42 @@ window.openSortiePanel = openSortiePanel; // same -- lets devtools/tests open th
 // app/auth.py's optional_mission_member docstring) -- omitting it preserves
 // the exact pre-login global/single-AO behavior, so currentMissionId starts
 // null (no mission selected) rather than forcing a choice before the map is
-// usable. Persisted to localStorage purely as a per-browser convenience
-// (mirrors the existing MISSION_NUMBER_KEY pattern below) -- the backend
-// independently re-checks membership on every mission-scoped call, so a
-// stale/forged value here can't leak another mission's data.
+// usable.
+//
+// Multi-tab fix (2026-10-18 plan): the URL's `?mission_id=` query param is now
+// the SOURCE OF TRUTH, not localStorage. Gerry's own example: "If they have 3
+// screens open with one login, they can still access 3 individual missions" --
+// under the old design all tabs shared one localStorage key with no URL
+// involvement, so they fought over one stored value on reload instead of each
+// holding an independent mission. localStorage is demoted to "the default a
+// brand-new tab starts with" ONLY -- set once at load, never read again after
+// that, and deliberately NOT kept in sync via a `storage` event listener (that
+// would just reintroduce the exact cross-tab coupling this fix removes).
+// Every place that changes the active mission must go through
+// setCurrentMissionId() below so the URL/localStorage stay consistent with the
+// in-memory value.
 const CURRENT_MISSION_KEY = "avtrack_current_mission_id";
 let currentUser = null;
 let currentMissions = [];
-let currentMissionId = localStorage.getItem(CURRENT_MISSION_KEY) || null;
+let currentMissionId = new URLSearchParams(location.search).get("mission_id") || localStorage.getItem(CURRENT_MISSION_KEY) || null;
+
+// Single chokepoint for changing the active mission: updates the in-memory
+// value, the URL (via history.replaceState -- never pushState, so switching
+// missions doesn't pollute browser back/forward history), and localStorage
+// (this tab's new "brand-new-tab default" going forward). Does NOT reload any
+// mission-scoped data itself -- callers already do that explicitly afterward.
+function setCurrentMissionId(missionId) {
+  currentMissionId = missionId || null;
+  const url = new URL(location.href);
+  if (currentMissionId) {
+    url.searchParams.set("mission_id", currentMissionId);
+    localStorage.setItem(CURRENT_MISSION_KEY, currentMissionId);
+  } else {
+    url.searchParams.delete("mission_id");
+    localStorage.removeItem(CURRENT_MISSION_KEY);
+  }
+  history.replaceState(null, "", url);
+}
 
 function withMissionParam(url) {
   if (!currentMissionId) return url;
@@ -166,6 +194,14 @@ const knownAircraft = new Set(); // tail_numbers from /api/aircraft -- see "unli
 const callsignByTail = new Map(); // tail_number -> callsign, so a loaded-but-not-yet-reporting tail still shows its callsign in the sidebar
 const defaultPicByTail = new Map(); // tail_number -> default_pic_name, from roster upload's optional pilot/instructor column
 const latestByTail = new Map(); // tail_number -> last position payload, for the side panel
+// tail_number -> Aircraft.id, added 2026-10-18 (mission-lifecycle plan item 3)
+// so the per-aircraft "Remove from mission" button has something to call
+// DELETE /api/aircraft/{id} with -- loadKnownAircraft() previously discarded
+// this id entirely since nothing needed it before.
+const aircraftIdByTail = new Map();
+// tail_number -> display-only wing-name hint (app/integrations/wing_lookup.py,
+// added 2026-10-18) -- never used for anything but the badge below.
+const wingHintByTail = new Map();
 
 // Airfield icon/label tiering (restored to a finer breakdown 2026-09-14 per Gerry:
 // "all the airport icons are noisy... use the same logic found on r815 EWMC to
@@ -894,6 +930,8 @@ async function loadKnownAircraft() {
       knownAircraft.add(a.tail_number);
       if (a.default_pic_name) defaultPicByTail.set(a.tail_number, a.default_pic_name);
       if (a.callsign) callsignByTail.set(a.tail_number, a.callsign);
+      aircraftIdByTail.set(a.tail_number, a.id);
+      if (a.wing_hint) wingHintByTail.set(a.tail_number, a.wing_hint);
     });
     renderPanel(); // the roster itself just changed (e.g. after a roster upload) -- reflect it immediately
   } catch (err) {
@@ -1211,15 +1249,42 @@ function renderPanel() {
       const meta = pos
         ? `${Math.round(pos.altitude_ft ?? 0)} ft${verticalTrendArrow(pos.vertical_trend)} · ${Math.round(pos.ground_speed_kt ?? 0)} kt`
         : tail; // not reporting -- show the tail number itself since callsign alone may not identify it
+      const wingHint = wingHintByTail.get(tail);
+      const wingBadge = wingHint ? ` <span class="wing-hint" title="Display hint only, from callsign pattern -- not authoritative">(${wingHint})</span>` : "";
+      // Remove-from-mission button (item 3, 2026-10-18 plan) -- only when a
+      // mission is active AND this tail is actually linked to it; there's
+      // nothing to unlink for a row that was never linked (unlisted), so this
+      // deliberately skips withMissionParam()'s optional-fallback pattern.
+      const removeBtn =
+        currentMissionId && !unlisted
+          ? `<button class="aircraft-remove-btn" data-tail="${tail}" title="Remove from this mission">✕</button>`
+          : "";
       return `
         <div class="aircraft-row state-${state} ${unlisted ? "unlisted" : ""}">
-          <div class="callsign">${callsign}${unlisted ? " ⚠" : ""}
-            <span class="status-badge status-${state}">${STATE_LABEL[state]}</span>
+          <div class="callsign">
+            <span>${callsign}${wingBadge}${unlisted ? " ⚠" : ""}</span>
+            <span class="aircraft-row-actions">
+              <span class="status-badge status-${state}">${STATE_LABEL[state]}</span>
+              ${removeBtn}
+            </span>
           </div>
           <div class="meta">${meta}</div>
         </div>`;
     })
     .join("");
+
+  list.querySelectorAll(".aircraft-remove-btn").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const tail = btn.dataset.tail;
+      if (!confirm(`Remove ${tail} from this mission? It stays in the global aircraft roster.`)) return;
+      const aircraftId = aircraftIdByTail.get(tail);
+      if (!aircraftId) return;
+      await fetch(`/api/aircraft/${aircraftId}?mission_id=${encodeURIComponent(currentMissionId)}`, { method: "DELETE" });
+      knownAircraft.delete(tail);
+      await loadKnownAircraft();
+    });
+  });
 }
 
 let wsConnected = false;
@@ -1823,14 +1888,17 @@ function renderDiscoveredSection(rows) {
     <div class="discovered-alert">
       <strong class="missing-flag">${rows.length} unregistered CAP/PARD aircraft${aoIsSet ? " in AO" : " (no AO set -- showing all)"}</strong>
       ${rows
-        .map(
-          (r) => `
+        .map((r) => {
+          const wingBadge = r.wing_hint
+            ? ` <span class="wing-hint" title="Display hint only, from callsign pattern -- not authoritative">(${r.wing_hint})</span>`
+            : "";
+          return `
         <div class="discovered-row">
-          <span>${r.source_label} ${r.callsign} / ${r.tail_number}</span>
+          <span>${r.source_label} ${r.callsign} / ${r.tail_number}${wingBadge}</span>
           <button class="discovered-approve" data-id="${r.id}">Approve</button>
           <button class="discovered-dismiss" data-id="${r.id}">Dismiss</button>
-        </div>`
-        )
+        </div>`;
+        })
         .join("")}
     </div>`;
   // approveDiscovered/dismissDiscovered already refresh the Ops Board themselves
@@ -2304,6 +2372,8 @@ function clearKnownAircraft() {
   knownAircraft.clear();
   callsignByTail.clear();
   defaultPicByTail.clear();
+  aircraftIdByTail.clear();
+  wingHintByTail.clear();
 }
 
 function populateMissionSelect() {
@@ -2313,22 +2383,44 @@ function populateMissionSelect() {
   for (const m of currentMissions) {
     const opt = document.createElement("option");
     opt.value = m.id;
-    opt.textContent = m.mission_number ? `${m.name} (${m.mission_number})` : m.name;
+    const label = m.mission_number ? `${m.name} (${m.mission_number})` : m.name;
+    opt.textContent = m.closed_at ? `${label} [closed]` : label;
     select.appendChild(opt);
   }
   select.value = currentMissions.some((m) => m.id === previousValue) ? previousValue : "";
   if (select.value !== previousValue) {
-    // The persisted mission no longer exists/isn't ours anymore -- fall back
-    // to unscoped rather than silently keeping a dead id around.
-    currentMissionId = null;
-    localStorage.removeItem(CURRENT_MISSION_KEY);
+    // The URL/persisted mission no longer exists/isn't ours anymore -- fall
+    // back to unscoped rather than silently keeping a dead id around.
+    setCurrentMissionId(null);
   }
   updateMissionMembersVisibility();
 }
 
+// Re-fetches currentMissions from /mine, honoring the "Show closed missions"
+// checkbox (item 5, 2026-10-18 plan), then re-renders the select. Used after
+// login and after any lifecycle action (leave/close/reopen/join) that could
+// change which missions should be listed.
+async function refreshMissionList() {
+  const includeClosed = document.getElementById("mission-show-closed-toggle").checked;
+  const res = await fetch(`/api/missions/mine${includeClosed ? "?include_closed=true" : ""}`);
+  if (res.ok) currentMissions = await res.json();
+  populateMissionSelect();
+}
+
+document.getElementById("mission-show-closed-toggle").addEventListener("change", refreshMissionList);
+
 function updateMissionMembersVisibility() {
-  document.getElementById("mission-members-section").style.display = currentMissionId ? "block" : "none";
-  if (currentMissionId) refreshMissionMembers();
+  const section = document.getElementById("mission-members-section");
+  section.style.display = currentMissionId ? "block" : "none";
+  if (!currentMissionId) return;
+  const mission = currentMissions.find((m) => m.id === currentMissionId);
+  const isClosed = !!mission?.closed_at;
+  // Leave/Close only make sense on an open mission the viewer can act on;
+  // a closed one shows a single Reopen button instead (item 5, 2026-10-18 plan).
+  document.getElementById("mission-leave-btn").hidden = isClosed;
+  document.getElementById("mission-close-btn").hidden = isClosed;
+  document.getElementById("mission-reopen-btn").hidden = !isClosed;
+  refreshMissionMembers();
 }
 
 async function refreshMissionMembers() {
@@ -2347,16 +2439,19 @@ async function refreshMissionMembers() {
   }
 }
 
-document.getElementById("mission-select").addEventListener("change", async (e) => {
-  currentMissionId = e.target.value || null;
-  if (currentMissionId) localStorage.setItem(CURRENT_MISSION_KEY, currentMissionId);
-  else localStorage.removeItem(CURRENT_MISSION_KEY);
+async function switchToMission(missionId) {
+  setCurrentMissionId(missionId || null);
+  document.getElementById("mission-select").value = currentMissionId || "";
   clearKnownAircraft();
   updateMissionMembersVisibility();
   await loadKnownAircraft();
   await loadPersistedOpsArea();
   await refreshDiscoveredMarkers();
   if (!document.getElementById("ops-board-panel").hidden) refreshOpsBoard();
+}
+
+document.getElementById("mission-select").addEventListener("change", async (e) => {
+  await switchToMission(e.target.value || null);
 });
 
 document.getElementById("mission-new-toggle").addEventListener("click", () => {
@@ -2388,8 +2483,7 @@ document.getElementById("mission-new-create").addEventListener("click", async ()
   document.getElementById("mission-new-role").value = "";
   document.getElementById("mission-new-form").hidden = true;
   populateMissionSelect();
-  document.getElementById("mission-select").value = mission.id;
-  document.getElementById("mission-select").dispatchEvent(new Event("change"));
+  await switchToMission(mission.id);
 });
 
 document.getElementById("mission-add-member-btn").addEventListener("click", async () => {
@@ -2412,6 +2506,104 @@ document.getElementById("mission-add-member-btn").addEventListener("click", asyn
   document.getElementById("mission-add-cap-id").value = "";
   document.getElementById("mission-add-role").value = "";
   await refreshMissionMembers();
+});
+
+// ── Leave / Close / Reopen (item 5, 2026-10-18 plan) -- three separate,
+// distinct actions, not merged. These are the first destructive-feeling
+// actions this UI offers, so each uses a plain confirm() first, matching
+// this app's existing alert()-only error-display convention (no custom
+// modal built just for this).
+document.getElementById("mission-leave-btn").addEventListener("click", async () => {
+  if (!currentMissionId) return;
+  if (!confirm("Leave this mission? You can rejoin later via the join box below.")) return;
+  await fetch(`/api/missions/${currentMissionId}/members/me`, { method: "DELETE" });
+  await refreshMissionList();
+  await switchToMission(null);
+});
+
+document.getElementById("mission-close-btn").addEventListener("click", async () => {
+  if (!currentMissionId) return;
+  if (!confirm("Close this mission? Its history stays intact -- this only hides it from the default mission list.")) return;
+  const closedId = currentMissionId;
+  const res = await fetch(`/api/missions/${closedId}/close`, { method: "POST" });
+  if (!res.ok) {
+    alert("Could not close mission.");
+    return;
+  }
+  const showClosed = document.getElementById("mission-show-closed-toggle").checked;
+  await refreshMissionList(); // re-fetch so the list/select reflects include_closed correctly
+  if (showClosed) {
+    // Still visible (the checkbox is on) -- keep it selected, now showing Reopen.
+    document.getElementById("mission-select").value = closedId;
+    updateMissionMembersVisibility();
+  } else {
+    // It just dropped out of the default (open-only) list -- fall back to
+    // unscoped rather than silently keeping a dead selection/stale data around.
+    await switchToMission(null);
+  }
+});
+
+document.getElementById("mission-reopen-btn").addEventListener("click", async () => {
+  if (!currentMissionId) return;
+  const res = await fetch(`/api/missions/${currentMissionId}/reopen`, { method: "POST" });
+  if (!res.ok) {
+    alert("Could not reopen mission.");
+    return;
+  }
+  // Reopened missions are always in the default (open-only) list, so a plain
+  // refresh keeps this one selected automatically via populateMissionSelect's
+  // existing "keep the current id if it's still in the list" logic.
+  await refreshMissionList();
+});
+
+// ── Join-a-mission combobox (item 4, 2026-10-18 plan) -- one control serves
+// both "browse" and "search by number," per Gerry's answer, rather than two
+// separate UI elements. Empty/focus shows the capped default list from
+// GET /api/missions; typing re-queries with ?q=.
+const missionJoinInput = document.getElementById("mission-join-input");
+const missionJoinResults = document.getElementById("mission-join-results");
+
+async function searchJoinableMissions(q) {
+  const url = q ? `/api/missions?q=${encodeURIComponent(q)}` : "/api/missions";
+  const res = await fetch(url);
+  if (!res.ok) return;
+  const rows = await res.json();
+  if (!rows.length) {
+    missionJoinResults.innerHTML = '<div style="padding:4px; font-size:11px; color:#9aa4ad;">No open missions found.</div>';
+  } else {
+    missionJoinResults.innerHTML = rows
+      .map((m) => {
+        const label = m.mission_number ? `${m.name} (${m.mission_number})` : m.name;
+        return `<div class="mission-join-row" data-id="${m.id}" style="padding:4px 6px; font-size:12px; cursor:pointer;">${label}</div>`;
+      })
+      .join("");
+    missionJoinResults.querySelectorAll(".mission-join-row").forEach((el) => {
+      el.addEventListener("click", async () => {
+        const res = await fetch(`/api/missions/${el.dataset.id}/join`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        if (!res.ok) {
+          alert("Could not join mission.");
+          return;
+        }
+        const mission = await res.json();
+        if (!currentMissions.some((m) => m.id === mission.id)) currentMissions.push(mission);
+        missionJoinInput.value = "";
+        missionJoinResults.hidden = true;
+        populateMissionSelect();
+        await switchToMission(mission.id);
+      });
+    });
+  }
+  missionJoinResults.hidden = false;
+}
+
+missionJoinInput.addEventListener("focus", () => searchJoinableMissions(missionJoinInput.value.trim()));
+missionJoinInput.addEventListener("input", () => searchJoinableMissions(missionJoinInput.value.trim()));
+document.addEventListener("click", (e) => {
+  if (!missionJoinResults.contains(e.target) && e.target !== missionJoinInput) missionJoinResults.hidden = true;
 });
 
 document.getElementById("logout-btn").addEventListener("click", async () => {

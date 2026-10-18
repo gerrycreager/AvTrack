@@ -1581,6 +1581,76 @@ phases 2-3 (see app/auth.py's docstring on it) are a deliberate transitional
 seam, not permanent -- once every caller always sends mission_id, those
 fallback branches should be deleted.
 
+**Shipped (2026-10-18, mission lifecycle + aircraft unlink + multi-tab
+context + wing hint):** full design/rollout plan
+`/home/gerry/.claude/plans/distributed-humming-sprout.md`. Closes the gap
+that made the auto-generated "Legacy" mission (holding most of Gerry's
+active aircraft/sorties) permanently stuck, and the lack of any way to
+remove an aircraft from a mission's roster or run independent missions in
+separate browser tabs.
+- **Mission lifecycle**: `DELETE /api/missions/{id}/members/me` (leave --
+  deletes only the caller's own `MissionMembership` row), `POST .../close`
+  and `POST .../reopen` (set/clear `Mission.closed_at`, both idempotent,
+  matching `DiscoveredCallsign.dismissed_at`'s convention) -- three
+  separate, distinct actions, not merged. `list_mine()` (`app/api/missions.py`)
+  and `me()` (`app/api/auth.py`) no longer each independently re-implement
+  the "every mission this user belongs to" loop -- both now call one shared
+  `app.api.auth.list_user_missions(user, session, include_closed=False)`
+  helper. Closing a mission only affects whether it shows up in the picker
+  by default; its sortie/aircraft history stays fully intact and queryable.
+- **Remove aircraft from a mission**: `DELETE /api/aircraft/{aircraft_id}?mission_id=...`
+  (`app/api/aircraft.py`, `mission_id` required) deletes only the
+  `MissionAircraft` link row -- never touches `Aircraft.active` or the
+  `Aircraft` row itself, per Gerry: "we don't eliminate an aircraft from the
+  database, we take it off a mission." Verified live: removing a disposable
+  aircraft from a mission dropped it from that mission's roster while the
+  global (no `mission_id`) listing still showed it `active: true`.
+- **Browse and self-join missions**: `GET /api/missions?q=<text>` (any
+  logged-in user, NOT gated by membership -- that's the point) lists open
+  missions, a capped recency-sorted default (20) when `q` is omitted,
+  substring match against name/mission_number (uncapped) when given.
+  `POST /{id}/join` self-service-joins (also not gated by
+  `require_mission_member`), upsert-or-noop against `MissionMembership`.
+  This is a new discoverability surface (mission names/numbers visible to
+  any logged-in user) -- confirmed acceptable by Gerry, matching the
+  existing low bar of self-service add-by-CAP-ID. Frontend: one
+  "Join a mission..." combobox (not two separate controls) backs both the
+  browse and search cases.
+- **Multi-tab mission context, fixed**: per Gerry, "If they have 3 screens
+  open with one login, they can still access 3 individual missions" --
+  previously all tabs shared one `localStorage` key with no URL involvement,
+  so they fought over one stored value on reload. `currentMissionId`
+  (`frontend/src/main.js`) now seeds from the URL's `?mission_id=` first,
+  falling back to `localStorage` only when absent; every place that changes
+  the active mission routes through one `setCurrentMissionId()` helper that
+  updates the URL (via `history.replaceState`, never `pushState`) and
+  `localStorage` together. `localStorage` is now purely "the default a
+  brand-new tab starts with" -- deliberately no `storage` event listener, so
+  tabs stay independent. A bookmarked/middle-clicked `?mission_id=...` link
+  now opens its own independent mission context in a new tab.
+- **Callsign-to-wing display hint**: `data/callsign_wing_lookup.csv`
+  (Gerry's authoritative 52-row Wing ID table, moved from the repo root and
+  tracked in git) loaded by `app/integrations/wing_lookup.py`'s
+  `wing_hint_for_callsign()` -- a pure function, keyed off the callsign's
+  leading wing-prefix digits (1 digit for wings 01-09, 2 digits for 10-52,
+  per the CSV's own pattern column). Surfaced as a small, parenthetical,
+  display-only badge next to the callsign on discovered-candidate rows and
+  roster rows (`AircraftOut.wing_hint`/`DiscoveredCallsignOut.wing_hint`,
+  set as a plain attribute on the ORM row before returning, not a real
+  column) -- never gates approve/dismiss or any authorization/data-integrity
+  decision, since Gerry's own framing was "usually but not always."
+- **Verified live**: curl, with disposable test missions/users/aircraft --
+  full close/reopen idempotency and default-visibility toggling, mission-
+  scoped vs. global aircraft listing around the unlink route, leave dropping
+  a mission off one user's list while it stayed on another's, and a
+  non-member browsing/joining an open mission. Playwright, with two browser
+  contexts under one disposable test account -- independent `?mission_id=`
+  per tab, a brand-new same-context tab falling back to the `localStorage`
+  default, and the Leave/Close/Reopen/Remove-aircraft buttons' `confirm()`
+  flows and resulting dropdown/button-visibility state. All disposable
+  rows/accounts were deleted afterward; the real "Legacy" mission and
+  Gerry's account/aircraft were untouched throughout.
+
 ## 4. UX Philosophy (per Gerry, 2026-09-13)
 
 - Start with **broad, varied selection options** exposed directly in the UI rather

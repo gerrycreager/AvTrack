@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import optional_mission_member
 from app.db import get_session
 from app.integrations.adsb_discovery import haversine_nm
+from app.integrations.wing_lookup import wing_hint_for_callsign
 from app.models import Aircraft, AircraftCallsign, DiscoveredCallsign, MissionAircraft, OperationsArea
 from app.schemas import AircraftOut, DiscoveredCallsignOut, OperationsAreaIn, OperationsAreaOut
 
@@ -56,6 +57,11 @@ async def list_discovered(
     is operation-specific."""
     await optional_mission_member(mission_id, request, session)
     rows = (await session.execute(select(DiscoveredCallsign).where(DiscoveredCallsign.dismissed_at.is_(None)))).scalars().all()
+    # Display-only wing-name hint (app/integrations/wing_lookup.py, added
+    # 2026-10-18) -- set as a plain attribute, not a DB column; see
+    # api/aircraft.py's list_aircraft for the identical pattern.
+    for r in rows:
+        r.wing_hint = wing_hint_for_callsign(r.callsign)
     if not ao_filter:
         return rows
     ao_query = select(OperationsArea)

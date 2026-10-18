@@ -13,6 +13,14 @@ class AircraftOut(BaseModel):
     wing: str | None
     default_pic_name: str | None
     active: bool
+    # Display-only wing-name hint derived from the callsign's leading digits
+    # (app/integrations/wing_lookup.py, added 2026-10-18) -- NOT a DB column;
+    # the API layer sets it as a plain attribute on the ORM object before
+    # returning, since Gerry's own framing ("usually but not always") means
+    # this must never be treated as authoritative. Null when the callsign
+    # doesn't match the usual CAP/PARD-shaped pattern, or its wing can't be
+    # determined.
+    wing_hint: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -252,6 +260,10 @@ class DiscoveredCallsignOut(BaseModel):
     last_altitude_ft: float | None
     last_ground_speed_kt: float | None
     last_heading_deg: float | None
+    # Same display-only wing-name hint as AircraftOut.wing_hint -- see that
+    # field's docstring. Set as a plain attribute on the ORM object before
+    # returning, not a real column.
+    wing_hint: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -303,6 +315,14 @@ class MissionCreateIn(BaseModel):
     name: str
     mission_number: str | None = None
     role: str | None = None  # the creator's own role tag on this mission
+
+
+class MissionJoinIn(BaseModel):
+    """Self-service join (POST /api/missions/{id}/join, added 2026-10-18) --
+    just an optional role tag, since the joining user is already implicit
+    (the caller's own session), unlike MissionMemberIn's add-by-CAP-ID."""
+
+    role: str | None = None
 
 
 class MissionMemberIn(BaseModel):

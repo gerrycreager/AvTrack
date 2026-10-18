@@ -35,6 +35,11 @@
     .status-badge.status-ground { background: #3a4048; color: #cdd3d8; }
     .status-badge.status-not-reporting { background: transparent; color: #6b7580; border: 1px solid #3a4048; }
     .status-badge.status-complete { background: #1a3a5c; color: #bcdcff; }
+    .wing-hint { font-weight: 400; font-size: 10px; color: #9aa4ad; } /* display-only, see wing_lookup.py */
+    .aircraft-row-actions { display: flex; align-items: center; gap: 4px; }
+    .aircraft-remove-btn { font-size: 10px; line-height: 1; padding: 1px 5px; cursor: pointer; border-radius: 3px; border: 1px solid #3a4048; background: #262b31; color: #e8eaed; }
+    .aircraft-remove-btn:hover { background: #5a2a2a; border-color: #d9534f; }
+    .mission-join-row:hover { background: #2a333c; }
     #locate-bar { position: absolute; top: 10px; left: 10px; z-index: 1; display: flex; gap: 6px; }
     #locate-bar input { padding: 6px 8px; border-radius: 4px; border: 1px solid #888; }
     #locate-bar input#locate-input { width: 220px; }
@@ -343,6 +348,9 @@
         <option value="">— none (legacy / unscoped) —</option>
       </select>
     </div>
+    <label style="font-size:11px; color:#9aa4ad; display:block; margin-bottom:4px;">
+      <input type="checkbox" id="mission-show-closed-toggle" /> Show closed missions
+    </label>
     <button id="mission-new-toggle" type="button" style="font-size:11px; margin-bottom:4px;">+ New mission</button>
     <div id="mission-new-form" hidden style="margin-bottom:6px;">
       <input type="text" id="mission-new-name" placeholder="Mission name" style="width:100%; box-sizing:border-box; margin-bottom:3px;" />
@@ -350,12 +358,21 @@
       <input type="text" id="mission-new-role" placeholder="Your role (IC/Ops/AOBD/COMMS, optional)" style="width:100%; box-sizing:border-box; margin-bottom:3px;" />
       <button id="mission-new-create" type="button">Create</button>
     </div>
+    <div style="margin-bottom:6px; position:relative;">
+      <input type="text" id="mission-join-input" placeholder="Join a mission…" autocomplete="off" style="width:100%; box-sizing:border-box; padding:4px; border-radius:3px; border:1px solid #444; background:#14181c; color:#e8eaed; font-size:12px;" />
+      <div id="mission-join-results" hidden style="position:absolute; z-index:5; width:100%; max-height:160px; overflow-y:auto; background:#1a1f24; border:1px solid #444; border-radius:3px; margin-top:2px;"></div>
+    </div>
     <div id="mission-members-section" style="display:none;">
       <div id="mission-members-list" style="font-size:11px; color:#9aa4ad; margin-bottom:4px;"></div>
       <input type="text" id="mission-add-cap-id" placeholder="CAP ID to add" style="width:46%; box-sizing:border-box;" />
       <input type="text" id="mission-add-role" placeholder="Role" style="width:44%; box-sizing:border-box;" />
       <button id="mission-add-member-btn" type="button" style="width:100%; margin-top:3px;">Add Member</button>
       <div id="mission-members-status" style="font-size:10px; color:#9aa4ad;"></div>
+      <div style="margin-top:6px; display:flex; gap:4px;">
+        <button id="mission-leave-btn" type="button" style="flex:1; font-size:11px;">Leave mission</button>
+        <button id="mission-close-btn" type="button" style="flex:1; font-size:11px;">Close mission</button>
+        <button id="mission-reopen-btn" type="button" hidden style="flex:1; font-size:11px;">Reopen mission</button>
+      </div>
     </div>
     <div class="divider"></div>
     <h3>Session Mission #</h3>

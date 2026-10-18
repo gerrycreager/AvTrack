@@ -27,6 +27,42 @@ from app.schemas import ChangePasswordIn, LoginIn, MeOut, MissionOut, UserOut
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+async def list_user_missions(
+    user: User, session: AsyncSession, include_closed: bool = False
+) -> list[MissionOut]:
+    """All missions `user` belongs to, each annotated with their OWN role on
+    that mission. Factored out 2026-10-18 (mission-lifecycle plan,
+    /home/gerry/.claude/plans/distributed-humming-sprout.md) -- `me()` below and
+    `list_mine()` (app/api/missions.py) used to each independently re-implement
+    this exact "every MissionMembership row for this user, joined to its
+    Mission" loop; now both call this one helper instead. `include_closed`
+    defaults to False everywhere except the frontend's explicit "show closed
+    missions" toggle, per Gerry -- closing a mission only affects whether it
+    shows up in a picker by default, never its underlying data."""
+    memberships = (
+        await session.execute(select(MissionMembership).where(MissionMembership.user_id == user.id))
+    ).scalars().all()
+    out = []
+    for m in memberships:
+        mission = await session.get(Mission, m.mission_id)
+        if mission is None:
+            continue
+        if not include_closed and mission.closed_at is not None:
+            continue
+        out.append(
+            MissionOut(
+                id=mission.id,
+                name=mission.name,
+                mission_number=mission.mission_number,
+                created_by=mission.created_by,
+                created_at=mission.created_at,
+                closed_at=mission.closed_at,
+                role=m.role,
+            )
+        )
+    return out
+
+
 @router.post("/login")
 async def login(body: LoginIn, response: Response, session: AsyncSession = Depends(get_session)):
     user = (await session.execute(select(User).where(User.cap_id == body.cap_id))).scalar_one_or_none()
@@ -62,24 +98,7 @@ async def logout(request: Request, response: Response, session: AsyncSession = D
 
 @router.get("/me", response_model=MeOut)
 async def me(user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)):
-    memberships = (
-        await session.execute(select(MissionMembership).where(MissionMembership.user_id == user.id))
-    ).scalars().all()
-    missions = []
-    for m in memberships:
-        mission = await session.get(Mission, m.mission_id)
-        if mission is not None:
-            missions.append(
-                MissionOut(
-                    id=mission.id,
-                    name=mission.name,
-                    mission_number=mission.mission_number,
-                    created_by=mission.created_by,
-                    created_at=mission.created_at,
-                    closed_at=mission.closed_at,
-                    role=m.role,
-                )
-            )
+    missions = await list_user_missions(user, session)
     return MeOut(user=UserOut.model_validate(user), missions=missions)
 
 
