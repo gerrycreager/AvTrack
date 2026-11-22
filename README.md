@@ -1,7 +1,9 @@
 # AvTrack
 
-Phase 1 scaffold. See `REQUIREMENTS.md` for the actual spec — this file is just
-"how do I run it."
+Phase 1 scaffold. New here? [`OVERVIEW.md`](OVERVIEW.md) explains what this
+is and why in plain language; [`ARCHITECTURE.md`](ARCHITECTURE.md) is the
+technical map of how it's put together. `REQUIREMENTS.md` is the detailed
+spec and build history. This file is just "how do I run it."
 
 ## Native dev (default on this machine)
 
