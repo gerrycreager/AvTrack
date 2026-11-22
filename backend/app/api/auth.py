@@ -64,7 +64,9 @@ async def list_user_missions(
 
 
 @router.post("/login")
-async def login(body: LoginIn, response: Response, session: AsyncSession = Depends(get_session)):
+async def login(
+    body: LoginIn, request: Request, response: Response, session: AsyncSession = Depends(get_session)
+):
     user = (await session.execute(select(User).where(User.cap_id == body.cap_id))).scalar_one_or_none()
     # Deliberately identical failure for "no such CAP ID" / "wrong password" /
     # "wrong TOTP code" -- no "password was right, just need the code" leak.
@@ -76,12 +78,23 @@ async def login(body: LoginIn, response: Response, session: AsyncSession = Depen
     ):
         raise HTTPException(401, "Invalid CAP ID, password, or authenticator code")
     token = await create_session(user, session)
+    # Secure per-request, not a global setting -- this app is reachable both over
+    # plain HTTP directly on the LAN (192.168.0.200:8000, kept for testing per
+    # Gerry) and over HTTPS via the r815 reverse proxy. uvicorn sees the LAN path
+    # as genuinely plain HTTP (request.url.scheme), and sees the proxied path as
+    # plain HTTP too since Apache terminates TLS and forwards over HTTP/WS on the
+    # LAN -- X-Forwarded-Proto (set by r815's vhost) is what tells those two
+    # apart. A cookie marked Secure is simply never sent back by the browser over
+    # a plain-HTTP connection, so getting this wrong either breaks LAN login
+    # (wrongly Secure) or ships an unmarked cookie over the public HTTPS path
+    # (wrongly not).
+    is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
         httponly=True,
         samesite="lax",
-        secure=settings.session_cookie_secure,
+        secure=is_https,
         max_age=settings.session_ttl_hours * 3600,
     )
     return {"status": "ok"}

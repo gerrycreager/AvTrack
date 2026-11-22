@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AvTrack Account Requests</title>
+<style>
+  :root { --bg: #14181c; --panel: #1c2126; --text: #e8eaed; --muted: #9aa4ad; --accent: #2b6cb0; --accent2: #6fa8dc; --border: #3a4048; --err: #ff6b6b; --ok: #7fd99a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 20px 80px; }
+  a { color: var(--accent2); }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .topnav { font-size: 13px; margin-bottom: 20px; }
+  .row { background: var(--panel); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
+  .row .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .row .cap-id { font-weight: 700; font-size: 15px; }
+  .row .when { color: var(--muted); font-size: 11px; }
+  .row .field { font-size: 13px; margin-top: 4px; }
+  .row .field .k { color: var(--muted); display: inline-block; width: 50px; }
+  .row .actions { margin-top: 10px; display: flex; gap: 8px; }
+  .row button { font-size: 12px; padding: 5px 12px; border-radius: 4px; border: 1px solid var(--border); background: #262b31; color: var(--text); cursor: pointer; }
+  .row .approve { border-color: var(--ok); color: var(--ok); }
+  .row .approve:hover { background: var(--ok); color: #0d1013; }
+  .row .deny { border-color: var(--err); color: var(--err); }
+  .row .deny:hover { background: var(--err); color: #0d1013; }
+  .row.done { opacity: 0.6; }
+  #status { color: var(--muted); font-size: 13px; }
+  details.exception { background: var(--panel); border-radius: 8px; padding: 12px 16px; margin-bottom: 22px; }
+  details.exception summary { cursor: pointer; font-size: 14px; }
+  details.exception form { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+  details.exception label { font-size: 12px; }
+  details.exception input, details.exception textarea { width: 100%; box-sizing: border-box; padding: 6px; margin-top: 3px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; font-family: inherit; }
+  details.exception button { padding: 7px; border-radius: 4px; border: none; background: var(--accent); color: white; cursor: pointer; font-size: 13px; align-self: flex-start; }
+  #exception-result { font-size: 13px; }
+  #exception-result code { word-break: break-all; display: block; background: var(--bg); padding: 6px; border-radius: 4px; font-size: 11px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="topnav"><a href="/">&larr; Back to the map</a></div>
+  <h1>Pending Account Requests</h1>
+  <details class="exception">
+    <summary>Register someone without a cap.gov/capnhq.gov email (exception)</summary>
+    <form id="exception-form">
+      <label>CAP ID<br/><input type="text" id="x-cap-id" required /></label>
+      <label>Name<br/><input type="text" id="x-display-name" required /></label>
+      <label>Email<br/><input type="email" id="x-email" required /></label>
+      <label>Note (optional)<br/><textarea id="x-note" rows="2"></textarea></label>
+      <button type="submit">Create &amp; Approve Immediately</button>
+      <div id="exception-result"></div>
+    </form>
+  </details>
+  <div id="status">Loading&hellip;</div>
+  <div id="list"></div>
+</main>
+<script>
+  const statusEl = document.getElementById("status");
+  const listEl = document.getElementById("list");
+
+  async function init() {
+    const me = await fetch("/api/auth/me");
+    if (!me.ok) {
+      statusEl.textContent = "Not logged in. Log in to the map first, then come back here.";
+      return;
+    }
+    const meData = await me.json();
+    if (!meData.user.is_admin) {
+      statusEl.textContent = "Your account doesn't have admin access.";
+      return;
+    }
+    await refresh();
+  }
+
+  async function refresh() {
+    const res = await fetch("/api/registration/pending");
+    if (!res.ok) {
+      statusEl.textContent = "Could not load pending requests.";
+      return;
+    }
+    const rows = await res.json();
+    if (rows.length === 0) {
+      statusEl.textContent = "No pending requests.";
+      listEl.innerHTML = "";
+      return;
+    }
+    statusEl.textContent = `${rows.length} pending`;
+    listEl.innerHTML = rows
+      .map(
+        (r) => `
+        <div class="row" data-id="${r.id}">
+          <div class="top"><span class="cap-id">${r.cap_id}</span><span class="when">${new Date(r.created_at).toLocaleString()}</span></div>
+          <div class="field"><span class="k">Name</span>${r.display_name}</div>
+          <div class="field"><span class="k">Email</span>${r.email}</div>
+          ${r.note ? `<div class="field"><span class="k">Note</span>${r.note}</div>` : ""}
+          <div class="actions">
+            <button class="approve" data-id="${r.id}">Approve</button>
+            <button class="deny" data-id="${r.id}">Deny</button>
+          </div>
+        </div>`
+      )
+      .join("");
+    listEl.querySelectorAll(".approve").forEach((b) => b.addEventListener("click", () => act(b.dataset.id, "approve")));
+    listEl.querySelectorAll(".deny").forEach((b) => b.addEventListener("click", () => act(b.dataset.id, "deny")));
+  }
+
+  async function act(id, action) {
+    if (action === "deny" && !confirm("Deny this request? No email is sent.")) return;
+    const res = await fetch(`/api/registration/${id}/${action}`, { method: "POST" });
+    if (!res.ok) {
+      alert("Could not " + action + " this request.");
+      return;
+    }
+    const row = document.querySelector(`.row[data-id="${id}"]`);
+    if (row) {
+      row.classList.add("done");
+      row.querySelector(".actions").innerHTML = `<em>${action === "approve" ? "Approved" : "Denied"}</em>`;
+    }
+  }
+
+  document.getElementById("exception-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const resultEl = document.getElementById("exception-result");
+    resultEl.textContent = "";
+    const body = {
+      cap_id: document.getElementById("x-cap-id").value.trim(),
+      display_name: document.getElementById("x-display-name").value.trim(),
+      email: document.getElementById("x-email").value.trim(),
+      note: document.getElementById("x-note").value.trim() || null,
+    };
+    const res = await fetch("/api/registration/admin-create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      resultEl.innerHTML = `<span style="color:#ff6b6b;">${err.detail ?? "Could not create this account."}</span>`;
+      return;
+    }
+    const data = await res.json();
+    resultEl.innerHTML = `Approved and emailed (if mail delivery works) -- setup link:<code>${data.setup_url}</code>`;
+    document.getElementById("exception-form").reset();
+  });
+
+  init();
+</script>
+</body>
+</html>

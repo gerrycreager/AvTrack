@@ -1,0 +1,180 @@
+"""Airfield markers/labels for the map (REQUIREMENTS.md 3.2).
+
+Bbox-filtered. Tiering originally matched CAP WxCOP's airport_tiers_endpoint.py
+convention, then got simplified to 2 tiers 2026-09-13 ("we can adjust later"), then
+restored to a finer breakdown 2026-09-14 per Gerry: "all the airport icons are
+noisy... let's use the same logic found on r815 EWMC to display a graduated number
+of airfields based on zoom." Read EWMC's actual logic directly
+(enhanced_weather_map_complete.html on r815): a 5-tier scheme (military / major-hub
+/ regional>=7000ft / local 5000-6999ft / small 2500-4999ft) each gated by a
+`TIER_MIN_ZOOM` threshold (`{1:0, 2:3, 3:3, 4:7, 5:12}` there), applied to BOTH icon
+and label visibility, not just labels.
+
+Two real differences from EWMC, both deliberate:
+- EWMC's tier 2 ("major hub") is a curated list of ~25 named major airports plus a
+  "has_reporting" (METAR-station) flag AvTrack doesn't have. First approximated here
+  as "paved >= 8000ft" (2026-09-14) since AvTrack had no equivalent curated data --
+  but Gerry caught live that this actually renders 334 airfields nationally, most
+  NOT hubs (former military fields, high-altitude GA strips needing longer runways
+  purely for density-altitude reasons, logistics/test fields) -- runway length
+  doesn't imply airline traffic. Replaced same day with FAA's own authoritative hub
+  classification (`Airfield.hub_type`, from the annual CY Enplanements report --
+  see scripts/import_faa_hub_classification.py): Large + Medium hub (63 airports
+  nationally, CY2024) is tier 2. A cleaner source than EWMC's curated list, not a
+  worse approximation of it.
+- EWMC's underlying query requires `has_paved_runway AND longest_runway_ft >= 2500`
+  for an airfield to appear AT ALL, at any zoom -- unpaved/short strips are
+  permanently invisible there. Gerry explicitly did NOT want that for AvTrack
+  ("keep all visible eventually... matters for CAP ops at small/unpaved fields") --
+  so there's a 5th tier here for everything else (unpaved, <2500ft, or missing
+  runway data) that EWMC simply excludes, gated by an even deeper zoom instead of
+  being hidden outright.
+"""
+
+import asyncio
+
+import shapely.wkb
+from fastapi import APIRouter, Depends, Query, Request
+from geoalchemy2.functions import ST_MakeEnvelope
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import get_session
+from app.models import Airfield
+from app.schemas import AirfieldOut
+
+router = APIRouter(prefix="/api/airfields", tags=["airfields"])
+
+MAJOR_HUB_TYPES = {"L", "M"}  # FAA Large/Medium hub -- see module docstring
+
+
+def compute_tier(
+    is_military: bool, hard_surface: bool | None, longest_runway_ft: float | None, hub_type: str | None = None
+) -> int:
+    """Every airfield gets a tier now (never None) -- see module docstring for why
+    tier 5 exists instead of excluding these outright the way EWMC does."""
+    if is_military:
+        return 1
+    if hub_type in MAJOR_HUB_TYPES:
+        return 2
+    if hard_surface and longest_runway_ft and longest_runway_ft >= 5000:
+        return 3
+    if hard_surface and longest_runway_ft and longest_runway_ft >= 2500:
+        return 4
+    return 5
+
+
+def compute_station_plot_tier(
+    is_military: bool, hard_surface: bool | None, longest_runway_ft: float | None, hub_type: str | None = None
+) -> int:
+    """Separate tiering for the Station Plot display mode (REQUIREMENTS.md 3.3a),
+    deliberately NOT reusing compute_tier() above -- Gerry's explicit call (2026-10-14)
+    was to keep this decoupled from the dot-layer's tier field so each can be tuned
+    independently. Thresholds mirror EWMC's own station-plot tiering (military / hub /
+    regional>=7000ft / local 5000-6999ft / small 2500-4999ft) as a starting point, not
+    compute_tier()'s thresholds -- the zoom defaults these feed on the frontend are
+    deliberately set lower than EWMC's own (see main.js), since AvTrack is typically
+    opened already scoped to a single wing or region, not CONUS-wide like WxCOP."""
+    if is_military:
+        return 1
+    if hub_type in MAJOR_HUB_TYPES:
+        return 2
+    if hard_surface and longest_runway_ft and longest_runway_ft >= 7000:
+        return 3
+    if hard_surface and longest_runway_ft and 5000 <= longest_runway_ft < 7000:
+        return 4
+    return 5
+
+
+@router.get("", response_model=list[AirfieldOut])
+async def list_airfields(
+    request: Request,
+    bounds: str | None = Query(None, description="west,south,east,north (WGS84) -- omit for no spatial filter"),
+    max_tier: int | None = Query(
+        None,
+        description="Only return airfields at or above this tier "
+        "(1=military, 2=FAA Large/Medium hub, 3=paved>=5000ft, 4=paved>=2500ft, 5=everything else); omit for all",
+    ),
+    session: AsyncSession = Depends(get_session),
+):
+    query = select(Airfield)
+    if bounds:
+        try:
+            west, south, east, north = (float(x) for x in bounds.split(","))
+        except ValueError:
+            west = south = east = north = None
+        if west is not None:
+            query = query.where(Airfield.location.intersects(ST_MakeEnvelope(west, south, east, north, 4326)))
+
+    result = await session.execute(query)
+    airfields = result.scalars().all()
+
+    # Found live 2026-11-02: at a wide-enough bbox (and the frontend never sent
+    # max_tier, so this always ran over the full ~22k-row table -- see
+    # frontend/src/main.js's refreshAirfields()) this per-row loop (shapely WKB
+    # parsing + Pydantic validation, no `await` anywhere in it) took 1.5-5+
+    # seconds. Since it ran inline on FastAPI's single event loop, that wasn't
+    # just this request being slow -- it stalled the ADS-B poll loops
+    # (asyncio.create_task'd onto the same loop in app/main.py) and every other
+    # concurrent request for the same duration. A plain asyncio.to_thread() was
+    # tried first but confirmed live NOT sufficient -- CPython's GIL still let
+    # the worker thread stall other requests for seconds at a time (shapely/GEOS
+    # calls don't release it reliably). A real OS process (app.state.cpu_pool,
+    # see app/main.py) has no GIL to contend with the event loop's thread.
+    #
+    # Only plain, picklable data crosses the process boundary -- a.location is a
+    # geoalchemy2 WKBElement (not reliably picklable/not importable assumptions
+    # worth relying on in the child), so its raw WKB bytes (`.data`) are pulled
+    # out here instead and re-parsed with shapely directly in the worker
+    # (confirmed live to produce identical coordinates to geoalchemy2's
+    # to_shape()). This extraction itself is cheap (attribute reads, no
+    # geometry parsing) so it's fine to do inline on the event loop.
+    rows = [
+        (
+            a.location.data,
+            a.is_military,
+            a.hard_surface_available,
+            a.longest_runway_ft,
+            a.hub_type,
+            a.id,
+            a.icao_id,
+            a.faa_id,
+            a.name,
+            a.elevation_ft,
+        )
+        for a in airfields
+    ]
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(request.app.state.cpu_pool, _build_airfield_rows, rows, max_tier)
+
+
+def _build_airfield_rows(
+    rows: list[tuple], max_tier: int | None
+) -> list[dict]:
+    """Runs in a worker process (see list_airfields above) -- must not touch
+    anything outside its own arguments (no DB session, no app state)."""
+    out = []
+    for wkb_data, is_military, hard_surface_available, longest_runway_ft, hub_type, id_, icao_id, faa_id, name, elevation_ft in rows:
+        tier = compute_tier(is_military, hard_surface_available, longest_runway_ft, hub_type)
+        if max_tier is not None and tier > max_tier:
+            continue
+        point = shapely.wkb.loads(bytes(wkb_data))
+        out.append(
+            {
+                "id": id_,
+                "icao_id": icao_id,
+                "faa_id": faa_id,
+                "name": name,
+                "latitude": point.y,
+                "longitude": point.x,
+                "elevation_ft": elevation_ft,
+                "longest_runway_ft": longest_runway_ft,
+                "hard_surface_available": hard_surface_available,
+                "is_military": is_military,
+                "tier": tier,
+                "station_plot_tier": compute_station_plot_tier(
+                    is_military, hard_surface_available, longest_runway_ft, hub_type
+                ),
+            }
+        )
+    return out

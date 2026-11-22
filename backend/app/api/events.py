@@ -7,10 +7,11 @@ manually logged; the schema doesn't change once auto-detection lands, only
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import require_time_edit_permission, require_time_logging_permission
 from app.db import get_session
 from app.models import Aircraft, DetectionMethod, EventEdit, EventType, Sortie, TrackingEvent
 from app.schemas import EventCreateIn, EventEditIn, EventEditOut, EventOut
@@ -57,6 +58,7 @@ def _to_event_out(event: TrackingEvent) -> EventOut:
         effective_time_utc=_effective_time(event),
         detected_by=event.detected_by.value,
         confidence=event.confidence,
+        comments=(event.raw or {}).get("comments"),
         edits=[EventEditOut.model_validate(e) for e in event.edits],
     )
 
@@ -75,7 +77,12 @@ async def list_events(tail_number: str, session: AsyncSession = Depends(get_sess
 
 
 @router.post("/api/aircraft/{tail_number}/events", response_model=EventOut)
-async def create_event(tail_number: str, body: EventCreateIn, session: AsyncSession = Depends(get_session)):
+async def create_event(
+    tail_number: str, body: EventCreateIn, request: Request, session: AsyncSession = Depends(get_session)
+):
+    """Gated by require_time_logging_permission (COMMS/AOBD/IC/Ops only, added
+    2026-10-26) using the open sortie's own mission_id, if any -- same as every
+    other time-logging route."""
     aircraft = await _get_aircraft_or_404(tail_number, session)
     try:
         event_type = EventType(body.event_type)
@@ -83,6 +90,7 @@ async def create_event(tail_number: str, body: EventCreateIn, session: AsyncSess
         raise HTTPException(422, f"Unknown event_type '{body.event_type}'") from None
 
     sortie = await _find_open_sortie(aircraft.id, session)
+    await require_time_logging_permission(sortie.mission_id if sortie else None, request, session)
 
     event = TrackingEvent(
         aircraft_id=aircraft.id,
@@ -90,21 +98,35 @@ async def create_event(tail_number: str, body: EventCreateIn, session: AsyncSess
         event_type=event_type,
         event_time_utc=body.event_time_utc or datetime.now(timezone.utc),
         detected_by=DetectionMethod.manual,
-        raw={"logged_by": body.logged_by},
+        raw={"logged_by": body.logged_by, "comments": body.comments} if body.comments else {"logged_by": body.logged_by},
     )
     session.add(event)
     await session.flush()  # need event.id before referencing it from Sortie below
 
     if sortie is not None:
-        # takeoff: first one wins (the sortie's actual departure). landing: latest
-        # wins -- covers "stop and go" (a real full stop immediately followed by
-        # another takeoff, same sortie) without needing to model multiple landings;
-        # per Gerry, misattribution there is "something that could be handled in
-        # edits," not something this write path needs to get perfect.
+        # takeoff/engine_start: first one wins (the sortie's actual
+        # departure/start). landing/engine_stop: latest wins -- covers "stop and
+        # go" (a real full stop immediately followed by another takeoff, same
+        # sortie) without needing to model multiple landings; per Gerry,
+        # misattribution there is "something that could be handled in edits,"
+        # not something this write path needs to get perfect. engine_start/stop
+        # added 2026-10-26 -- this route previously only linked takeoff/landing,
+        # which meant logging Engine Start/Stop through the comms quick-select
+        # menu (as opposed to the dedicated Start/Stop Sortie forms) silently
+        # never updated Sortie.engine_start_event_id/engine_stop_event_id. Per
+        # Gerry: Engine Start/Stop are comms calls like any other, not a
+        # separate administrative action, and -- for a WMIRS-imported planned
+        # sortie, which already exists with no engine_start_event_id yet -- this
+        # route is the ONLY way to log Engine Start at all (the dedicated Start
+        # Sortie form only ever shows when no Sortie row exists yet).
         if event_type == EventType.takeoff and sortie.takeoff_event_id is None:
             sortie.takeoff_event_id = event.id
         elif event_type == EventType.landing:
             sortie.landing_event_id = event.id
+        elif event_type == EventType.engine_start and sortie.engine_start_event_id is None:
+            sortie.engine_start_event_id = event.id
+        elif event_type == EventType.engine_stop:
+            sortie.engine_stop_event_id = event.id
 
     await session.commit()
     await session.refresh(event, attribute_names=["edits"])
@@ -112,13 +134,25 @@ async def create_event(tail_number: str, body: EventCreateIn, session: AsyncSess
 
 
 @router.post("/api/events/{event_id}/edits", response_model=EventOut)
-async def edit_event(event_id: str, body: EventEditIn, session: AsyncSession = Depends(get_session)):
+async def edit_event(
+    event_id: str, body: EventEditIn, request: Request, session: AsyncSession = Depends(get_session)
+):
     """Adds a correction on top of an existing event -- never mutates the original
-    row (REQUIREMENTS.md 3.3/4: append-only tracking log, edits layered on top)."""
+    row (REQUIREMENTS.md 3.3/4: append-only tracking log, edits layered on top).
+
+    Gated by require_time_edit_permission (added 2026-10-26): COMMS/AOBD/IC/Ops,
+    OR the event's own sortie's pilot (matched by CAP ID, Sortie.pic_cap_id) --
+    "a pilot should be able to edit the times" per Gerry, even though in
+    practice they rarely do."""
     result = await session.execute(select(TrackingEvent).where(TrackingEvent.id == event_id))
     event = result.scalar_one_or_none()
     if event is None:
         raise HTTPException(404, "No such event")
+
+    sortie = await session.get(Sortie, event.sortie_id) if event.sortie_id else None
+    await require_time_edit_permission(
+        sortie.mission_id if sortie else None, sortie.pic_cap_id if sortie else None, request, session
+    )
 
     old_value = None
     if body.field_name == "event_time_utc":

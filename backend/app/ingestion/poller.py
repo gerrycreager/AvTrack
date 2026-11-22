@@ -76,6 +76,14 @@ async def poll_once(provider: ADSBProvider) -> None:
             aircraft = aircraft_by_tail.get(pos.tail_number)
             if aircraft is None:
                 continue
+            # Opportunistic icao24 backfill (added 2026-10-24 for app/adsb/opensky.py,
+            # which can only filter by icao24, not registration) -- any provider whose
+            # raw payload happens to include "hex" fills this in the first time we see
+            # it, no separate import/backfill job needed.
+            if aircraft.icao24 is None:
+                hex_val = (pos.raw or {}).get("hex")
+                if hex_val:
+                    aircraft.icao24 = hex_val.strip().lower()
             vertical_trend = _vertical_trend(prev_by_aircraft_id.get(aircraft.id), pos.altitude_ft, pos.ts_utc)
             row = Position(
                 aircraft_id=aircraft.id,
@@ -107,8 +115,19 @@ async def poll_once(provider: ADSBProvider) -> None:
         await session.commit()
 
 
-async def run_poll_loop(provider: ADSBProvider, interval_seconds: int | None = None) -> None:
+async def run_poll_loop(
+    provider: ADSBProvider, interval_seconds: int | None = None, initial_delay_seconds: float = 0
+) -> None:
     interval = interval_seconds if interval_seconds is not None else settings.adsb_poll_interval_seconds
+    # Phase offset (REQUIREMENTS.md 3.5, added 2026-10-24) -- without this, two
+    # providers on the same interval both fire their first poll_once() at app
+    # startup and stay in lockstep forever (both landing at t=0, 30, 60s...),
+    # wasting the second provider's redundancy: a tail covered by both only ever
+    # gets updated at the slower effective rate, not the interleaved one. A
+    # one-time offset before the loop starts is enough; the periodic sleep below
+    # preserves the stagger indefinitely.
+    if initial_delay_seconds:
+        await asyncio.sleep(initial_delay_seconds)
     while True:
         try:
             await poll_once(provider)

@@ -85,12 +85,76 @@ class Settings(BaseSettings):
     candidate_refresh_poll_interval_seconds: int = 30
     # Per-user/per-mission accounts (REQUIREMENTS.md open question 7, added
     # 2026-10-16 per Gerry). Sessions are opaque random tokens (app/auth.py),
-    # not signed JWTs, so there's no secret key to manage -- just a TTL and
-    # whether the cookie requires HTTPS. secure=False by default so login still
-    # works on the current plain-HTTP LAN deployment (192.168.0.57:8000);
-    # set true once this is served over HTTPS (e.g. via the r815 reverse proxy).
+    # not signed JWTs, so there's no secret key to manage -- just a TTL.
+    # Whether the session cookie carries Secure is decided per-request in
+    # app/api/auth.py's login(), not a global flag here -- this deployment is
+    # genuinely dual-path (plain-HTTP direct LAN at 192.168.0.200:8000 for
+    # testing, HTTPS via the r815 reverse proxy for everything else), and a
+    # single global setting can only be correct for one of those at a time
+    # (found live 2026-10-22: flipping a global secure=True broke LAN login).
     session_ttl_hours: int = 12
-    session_cookie_secure: bool = False
+    # Hard retention policy for raw Position rows (REQUIREMENTS.md 3.5, added
+    # 2026-10-19). Per Gerry: a hard cutoff, 30 days initially, "could decrease to
+    # 14 days" -- config-driven so tightening it later is a one-line .env change,
+    # not a code change. Position has no other pruning and was already at 23k
+    # rows / 19MB after ~6 weeks with only one provider polling; this stops
+    # unbounded growth before it becomes a real problem. Same kill-switch
+    # convention as the other pollers.
+    position_retention_days: int = 30
+    position_retention_enabled: bool = True
+    position_retention_check_interval_seconds: int = 3600
+    # OpenSky Network (REQUIREMENTS.md 3.5, added 2026-10-24) -- second concurrent
+    # free provider, registered under Gerry's capnhq.gov account (Standard tier,
+    # confirmed via OpenSky's own docs: this is the normal registered-account tier,
+    # NOT gated behind running a feeder -- that only raises it further, to 8,000/day).
+    # Credentials are an OAuth2 client_id/client_secret pair (OpenSky retired Basic
+    # auth 2026-03-18), not a single key -- see app/adsb/opensky.py.
+    opensky_client_id: str = ""
+    opensky_client_secret: str = ""
+    # No per-call cost (unlike AeroAPI) so this defaults on like adsb.lol's, not off
+    # like FlightAware's -- same kill-switch convention regardless.
+    opensky_polling_enabled: bool = True
+    # Measured live 2026-10-24 against the real account: an icao24-filtered
+    # /states/all call costs 4 credits, not the 1 credit OpenSky's docs suggest for
+    # a "serial-only" query (confirmed by 3 back-to-back calls, remaining count
+    # dropped by exactly 4 each time) -- going by the docs' own number here would
+    # have silently exhausted the day's budget in under 17 minutes at adsb.lol's 30s
+    # cadence. At 4,000 credits/day ÷ 4 = 1,000 calls/day max, a 90s interval
+    # (960 calls/day) leaves real headroom for retries and the dev/test cycle,
+    # while adsb.lol stays the fast, primary poller.
+    opensky_poll_interval_seconds: int = 90
+    # adsb.fi (REQUIREMENTS.md 3.5, added 2026-10-24) -- third concurrent free
+    # provider, same lineage/shape as adsb.lol. No API key for the public tier.
+    # Documented, explicit rate limit (unlike adsb.lol's undocumented guesswork):
+    # 1 request/second public, see app/adsb/adsb_fi.py. One bulk call per cycle,
+    # so interval_seconds=1.5 -> ~0.67 req/sec, still real margin under the
+    # documented cap (not running at the exact edge), since adsb.fi's own policy
+    # counts any 4xx toward a temporary IP restriction (unlike adsb.lol, where a
+    # bad request just wastes a call). Tightened from 30s -> 2s 2026-10-24, then
+    # 2s -> 1.5s 2026-11-02, both times per Gerry wanting a tighter
+    # operating-picture cadence; adsb.lol itself was deliberately left untouched
+    # at 30s (mid-recovery from its own throttle episode -- see
+    # project_adsblol_throttling memory).
+    adsbfi_polling_enabled: bool = True
+    adsbfi_poll_interval_seconds: float = 1.5
+
+    # Self-service account requests (REQUIREMENTS.md 3.7 follow-up, added
+    # 2026-11-02) -- no SMTP credentials live here at all. app/email.py shells
+    # out to the system `msmtp -a gmail` relay already used by CAP WxCOP's own
+    # alerting (confirmed live: AvTrack's backend already runs as the `gerry`
+    # user, which already has read access to /etc/msmtprc's ACL -- no new
+    # secret, no copy, nothing in this file to configure for sending itself).
+    # Comma-separated -- who gets the "new registration request" email.
+    admin_notification_emails: str = ""
+    # The real, externally-reachable base URL for links sent in email (e.g.
+    # https://wxcop.duckdns.org:2468) -- never the LAN-only bind address the
+    # backend itself listens on. Required (no safe default) for any emailed
+    # link to be useful to someone off-LAN.
+    public_base_url: str = ""
+
+    @property
+    def admin_notification_email_list(self) -> list[str]:
+        return [e.strip() for e in self.admin_notification_emails.split(",") if e.strip()]
 
     @property
     def default_callsign_prefix_list(self) -> list[str]:

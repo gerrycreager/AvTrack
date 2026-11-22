@@ -31,9 +31,13 @@ Two real differences from EWMC, both deliberate:
   being hidden outright.
 """
 
-from fastapi import APIRouter, Depends, Query
+import asyncio
+import json
+
+import shapely.wkb
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import Response
 from geoalchemy2.functions import ST_MakeEnvelope
-from geoalchemy2.shape import to_shape
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,6 +90,7 @@ def compute_station_plot_tier(
 
 @router.get("", response_model=list[AirfieldOut])
 async def list_airfields(
+    request: Request,
     bounds: str | None = Query(None, description="west,south,east,north (WGS84) -- omit for no spatial filter"),
     max_tier: int | None = Query(
         None,
@@ -106,28 +111,83 @@ async def list_airfields(
     result = await session.execute(query)
     airfields = result.scalars().all()
 
+    # Found live 2026-11-02: at a wide-enough bbox (and the frontend never sent
+    # max_tier, so this always ran over the full ~22k-row table -- see
+    # frontend/src/main.js's refreshAirfields()) this per-row loop (shapely WKB
+    # parsing + Pydantic validation, no `await` anywhere in it) took 1.5-5+
+    # seconds. Since it ran inline on FastAPI's single event loop, that wasn't
+    # just this request being slow -- it stalled the ADS-B poll loops
+    # (asyncio.create_task'd onto the same loop in app/main.py) and every other
+    # concurrent request for the same duration. A plain asyncio.to_thread() was
+    # tried first but confirmed live NOT sufficient -- CPython's GIL still let
+    # the worker thread stall other requests for seconds at a time (shapely/GEOS
+    # calls don't release it reliably). A real OS process (app.state.cpu_pool,
+    # see app/main.py) has no GIL to contend with the event loop's thread.
+    #
+    # Only plain, picklable data crosses the process boundary -- a.location is a
+    # geoalchemy2 WKBElement (not reliably picklable/not importable assumptions
+    # worth relying on in the child), so its raw WKB bytes (`.data`) are pulled
+    # out here instead and re-parsed with shapely directly in the worker
+    # (confirmed live to produce identical coordinates to geoalchemy2's
+    # to_shape()). This extraction itself is cheap (attribute reads, no
+    # geometry parsing) so it's fine to do inline on the event loop.
+    rows = [
+        (
+            a.location.data,
+            a.is_military,
+            a.hard_surface_available,
+            a.longest_runway_ft,
+            a.hub_type,
+            a.id,
+            a.icao_id,
+            a.faa_id,
+            a.name,
+            a.elevation_ft,
+        )
+        for a in airfields
+    ]
+    loop = asyncio.get_running_loop()
+    body = await loop.run_in_executor(request.app.state.cpu_pool, _build_airfield_rows, rows, max_tier)
+    # Returning a raw Response with pre-dumped JSON, not the list of dicts itself
+    # -- found live 2026-11-02: the process-pool move above fixed the geometry-
+    # parsing cost, but FastAPI's own json.dumps() of a ~6MB nested structure
+    # (which it does synchronously, back on the event loop, for any plain
+    # dict/list return) was STILL stalling other requests for 2+ seconds on its
+    # own. Doing json.dumps() in the worker process too and shipping back a
+    # single string fixes that -- a string pickles/unpickles across the process
+    # boundary almost for free (confirmed live: <0.1s), unlike the json.dumps()
+    # call itself. response_model stays on the route purely for the OpenAPI
+    # schema; returning a Response here bypasses FastAPI's own
+    # validation/serialization of it entirely.
+    return Response(content=body, media_type="application/json")
+
+
+def _build_airfield_rows(rows: list[tuple], max_tier: int | None) -> str:
+    """Runs in a worker process (see list_airfields above) -- must not touch
+    anything outside its own arguments (no DB session, no app state). Returns an
+    already-dumped JSON string, not a Python object -- see the caller's comment."""
     out = []
-    for a in airfields:
-        tier = compute_tier(a.is_military, a.hard_surface_available, a.longest_runway_ft, a.hub_type)
+    for wkb_data, is_military, hard_surface_available, longest_runway_ft, hub_type, id_, icao_id, faa_id, name, elevation_ft in rows:
+        tier = compute_tier(is_military, hard_surface_available, longest_runway_ft, hub_type)
         if max_tier is not None and tier > max_tier:
             continue
-        point = to_shape(a.location)
+        point = shapely.wkb.loads(bytes(wkb_data))
         out.append(
-            AirfieldOut(
-                id=a.id,
-                icao_id=a.icao_id,
-                faa_id=a.faa_id,
-                name=a.name,
-                latitude=point.y,
-                longitude=point.x,
-                elevation_ft=a.elevation_ft,
-                longest_runway_ft=a.longest_runway_ft,
-                hard_surface_available=a.hard_surface_available,
-                is_military=a.is_military,
-                tier=tier,
-                station_plot_tier=compute_station_plot_tier(
-                    a.is_military, a.hard_surface_available, a.longest_runway_ft, a.hub_type
+            {
+                "id": str(id_),
+                "icao_id": icao_id,
+                "faa_id": faa_id,
+                "name": name,
+                "latitude": point.y,
+                "longitude": point.x,
+                "elevation_ft": elevation_ft,
+                "longest_runway_ft": longest_runway_ft,
+                "hard_surface_available": hard_surface_available,
+                "is_military": is_military,
+                "tier": tier,
+                "station_plot_tier": compute_station_plot_tier(
+                    is_military, hard_surface_available, longest_runway_ft, hub_type
                 ),
-            )
+            }
         )
-    return out
+    return json.dumps(out)

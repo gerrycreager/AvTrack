@@ -15,13 +15,14 @@ prefix word (confirmed with Gerry 2026-10-14): "PARD123", "PARD 123", etc.
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import re
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.adsb import rate_limit
 from app.db import SessionLocal
 from app.models import Aircraft, DiscoveredCallsign
 
@@ -37,6 +38,15 @@ ADSB_LOL_MAX_RADIUS_NM = 250
 
 CALLSIGN_RE = re.compile(r"^(CAP|PARD)\s?\d+$", re.IGNORECASE)
 
+# Staleness cutoff for the discovered-candidates list (REQUIREMENTS.md 3.1, added
+# 2026-10-18). Found live: list_discovered never filtered by recency at all, so a
+# sighting nobody got around to dismissing lingered forever -- of 194 undismissed
+# rows checked live, the oldest was 33 days stale and only 60 were under 24h old.
+# Per Gerry, 12h is reasonable for "is this still a live concern." Shared here (not
+# just app/api/discovered.py) so refresh_known_candidates also stops spending
+# adsb.lol calls keeping a row fresh that's already aged out of being shown anywhere.
+CANDIDATE_STALE_CUTOFF = timedelta(hours=12)
+
 
 def new_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
@@ -47,13 +57,21 @@ def new_client() -> httpx.AsyncClient:
 
 
 async def fetch_point(client: httpx.AsyncClient, lat: float, lon: float, radius_nm: float) -> list[dict]:
+    if rate_limit.adsb_lol.blocked():
+        return []
     radius = min(int(radius_nm), ADSB_LOL_MAX_RADIUS_NM)
     try:
         resp = await client.get(f"/v2/point/{lat}/{lon}/{radius}")
         resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            rate_limit.adsb_lol.on_429()
+        logger.warning("adsb.lol point query failed for (%s, %s, %snm)", lat, lon, radius, exc_info=True)
+        return []
     except Exception:
         logger.warning("adsb.lol point query failed for (%s, %s, %snm)", lat, lon, radius, exc_info=True)
         return []
+    rate_limit.adsb_lol.on_success()
     return resp.json().get("ac") or []
 
 
@@ -150,12 +168,20 @@ async def fetch_registrations(client: httpx.AsyncClient, tails: list[str]) -> li
     ~2 requests, batching into one comma-separated call per cycle sidesteps it)."""
     if not tails:
         return []
+    if rate_limit.adsb_lol.blocked():
+        return []
     try:
         resp = await client.get(f"/v2/reg/{','.join(tails)}")
         resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            rate_limit.adsb_lol.on_429()
+        logger.warning("adsb.lol bulk reg lookup failed for %d tails", len(tails), exc_info=True)
+        return []
     except Exception:
         logger.warning("adsb.lol bulk reg lookup failed for %d tails", len(tails), exc_info=True)
         return []
+    rate_limit.adsb_lol.on_success()
     return resp.json().get("ac") or []
 
 
@@ -178,10 +204,22 @@ async def refresh_known_candidates() -> int:
     updates a row if the aircraft's current flight callsign still matches that row's
     stored callsign exactly, so a tail that's since started squawking a different
     callsign is left alone for the slow sweep to pick up as its own distinct
-    candidate row, same as today."""
+    candidate row, same as today.
+
+    Skips rows older than CANDIDATE_STALE_CUTOFF (added 2026-10-18) -- no point
+    spending an adsb.lol call keeping a candidate "fresh" that list_discovered has
+    already aged out of showing anywhere; a re-sighting still revives it via the
+    slow sweep/AO poller's own upsert_matches(), same as any other re-appearance."""
+    cutoff = datetime.now(timezone.utc) - CANDIDATE_STALE_CUTOFF
     async with SessionLocal() as session:
         rows = (
-            (await session.execute(select(DiscoveredCallsign).where(DiscoveredCallsign.dismissed_at.is_(None))))
+            (
+                await session.execute(
+                    select(DiscoveredCallsign).where(
+                        DiscoveredCallsign.dismissed_at.is_(None), DiscoveredCallsign.last_seen_at >= cutoff
+                    )
+                )
+            )
             .scalars()
             .all()
         )

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv.*/
 venv/
 .env
 *.egg-info/
@@ -12,4 +13,8 @@ dist/
 pgdata/
 data/
 jumpstart-latest.tar.gz
+jumpstart-latest_STDDS.tar
 jumpstart/
+jumpstart-stdds/
+*.xlsm
+.claude/

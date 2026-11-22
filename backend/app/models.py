@@ -56,6 +56,14 @@ class Aircraft(Base):
     # is still what's actually logged and is independently editable at Start Sortie
     # time.
     default_pic_name: Mapped[str | None] = mapped_column(String(100))
+    # ICAO 24-bit transponder address (hex, e.g. "ac6703") -- added 2026-10-24 for
+    # app/adsb/opensky.py, which (unlike adsb.lol/FlightAware) can only filter
+    # /states/all by this, not by registration. Never provided by any import source
+    # we have; opportunistically backfilled from any provider's raw position data
+    # that happens to include it (adsb.lol always does) -- see poller.py's
+    # poll_once(). Null until a tail is actually seen at least once by such a
+    # provider, so OpenSky coverage lags adsb.lol's for a never-before-seen tail.
+    icao24: Mapped[str | None] = mapped_column(String(6), index=True)
     active: Mapped[bool] = mapped_column(default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -119,6 +127,8 @@ class PositionSource(str, enum.Enum):
     flightaware = "flightaware"
     swim = "swim"  # FAA SWIM/FDPS, via the r815 relay -- see REQUIREMENTS.md 3.5
     adsb_lol = "adsb_lol"  # api.adsb.lol -- free/open raw ADS-B, see app/adsb/adsb_lol.py
+    opensky = "opensky"  # OpenSky Network -- free/open raw ADS-B, see app/adsb/opensky.py
+    adsb_fi = "adsb_fi"  # adsb.fi -- free/open raw ADS-B, see app/adsb/adsb_fi.py
     other = "other"
 
 
@@ -155,6 +165,14 @@ class EventType(str, enum.Enum):
     in_grid = "in_grid"
     out_grid = "out_grid"
     ops_check = "ops_check"
+    # Comms quick-select menu additions (REQUIREMENTS.md 3.3, added 2026-10-26,
+    # per Gerry's radio-call vocabulary: "Find, PIREP, ... RTB" alongside the
+    # existing types above). Same append-only TrackingEvent/EventEdit mechanism,
+    # backed by SortieWaypoint the same way in_grid/out_grid/ops_check already
+    # are -- see WaypointLocationMethod and SortieWaypoint below.
+    find = "find"
+    pirep = "pirep"
+    rtb = "rtb"
 
 
 class DetectionMethod(str, enum.Enum):
@@ -266,6 +284,14 @@ class Sortie(Base):
     # self-contained even if the convenience default changes mid-day.
     mission_number: Mapped[str | None] = mapped_column(String(50))
     pic_name: Mapped[str | None] = mapped_column(String(100))
+    # The pilot's CAP ID (added 2026-10-26, REQUIREMENTS.md 3.3) -- separate from
+    # pic_name, which stays free text for the human-readable record. This is the
+    # authoritative identity check behind "a pilot should be able to edit the
+    # times" (require_time_edit_permission, app/auth.py): matched against the
+    # logged-in user's own User.cap_id, not by comparing names (unreliable --
+    # nicknames, typos). Optional -- when not on file, the pilot-edit exception
+    # just doesn't apply for that sortie.
+    pic_cap_id: Mapped[str | None] = mapped_column(String(20))
     engine_start_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
     engine_stop_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
     takeoff_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracking_events.id"))
@@ -295,7 +321,42 @@ class Sortie(Base):
     # a safety-critical timestamp.
     assigned_area: Mapped[str | None] = mapped_column(String(100))
 
+    # WMIRS sortie-planning import (REQUIREMENTS.md 3.3, added 2026-10-19). A sortie
+    # created by the importer has engine_start_event_id left null -- "planned" is
+    # just that, not a separate enum column (see effective_status() below). A
+    # cancelled sortie is ALSO start-less, so it needs its own marker -- same
+    # idempotent-timestamp convention as Mission.closed_at/DiscoveredCallsign.
+    # dismissed_at, not a new pattern.
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Verbatim WMIRS Sortie ID (e.g. "A0201") -- alphanumeric, doesn't fit
+    # sortie_number (int). NOT globally unique: WMIRS's own numbering isn't
+    # confirmed unique across missions or re-used-day-to-day, so uniqueness is
+    # scoped to (mission_id, wmirs_sortie_id) below, and only enforced at all for
+    # imported rows (both columns are null for everything else).
+    wmirs_sortie_id: Mapped[str | None] = mapped_column(String(20), index=True)
+    # WMIRS's SortieDate -- the planned flight date, distinct from created_at
+    # (import time) and from the real engine_start_event once the sortie flies.
+    planned_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Departure/Destination -- WMIRS gives truncated ICAO idents (missing the K/P/T
+    # region prefix). Resolved to a real Airfield at import time (faa_id match first,
+    # then K/P/T-prefixed icao_id -- see app/api/wmirs_import.py), but the raw code is
+    # kept alongside for traceability even when resolution fails, same reasoning as
+    # SortieWaypoint.raw_input.
+    departure_airfield_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("airfields.id"))
+    destination_airfield_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("airfields.id"))
+    departure_raw: Mapped[str | None] = mapped_column(String(10))
+    destination_raw: Mapped[str | None] = mapped_column(String(10))
+    # The full imported WMIRS row, verbatim (Hobbs/fuel/TrackingNo/MissionSymbol/
+    # AircraftType-as-string/etc) -- same "keep the raw alongside the parsed fields"
+    # pattern as TrackingEvent.raw, cheaper than a narrow column per WMIRS field and
+    # future-proof if WMIRS's export gains columns.
+    wmirs_raw: Mapped[dict | None] = mapped_column(JSON)
+
     aircraft: Mapped["Aircraft"] = relationship()
+    departure_airfield: Mapped["Airfield | None"] = relationship(foreign_keys=[departure_airfield_id], lazy="selectin")
+    destination_airfield: Mapped["Airfield | None"] = relationship(
+        foreign_keys=[destination_airfield_id], lazy="selectin"
+    )
     engine_start_event: Mapped["TrackingEvent | None"] = relationship(
         foreign_keys=[engine_start_event_id], lazy="selectin"
     )
@@ -309,22 +370,56 @@ class Sortie(Base):
         foreign_keys="TrackingEvent.sortie_id", order_by="TrackingEvent.event_time_utc", lazy="selectin"
     )
 
+    def effective_status(self) -> str:
+        """planned / active / complete / cancelled, derived from the existing
+        nullable event-FK chain plus cancelled_at -- deliberately not a stored
+        enum column (see cancelled_at's comment above). Shared by SortieOut and
+        the Ops Board so both agree on the same derivation."""
+        if self.cancelled_at is not None:
+            return "cancelled"
+        if self.engine_stop_event_id is not None:
+            return "complete"
+        if self.engine_start_event_id is not None:
+            return "active"
+        return "planned"
+
+    __table_args__ = (UniqueConstraint("mission_id", "wmirs_sortie_id", name="uq_sortie_mission_wmirs_id"),)
+
 
 class SortieWaypoint(Base):
-    """An in-grid/out-grid/operations-check entry within a sortie (REQUIREMENTS.md
-    3.3, added 2026-09-13 per Gerry). Repeatable per sortie -- e.g. multiple grids
-    searched, or periodic ops checks, not just one of each. `waypoint_type` (which
-    of in_grid/out_grid/ops_check this is) lives on the linked TrackingEvent, not
-    duplicated here. `raw_input`/`location_method` preserve exactly what the user
-    entered even after resolving to lat/lon for map display (accountability).
+    """An in-grid/out-grid/operations-check/find/pirep/RTB entry within a sortie
+    (REQUIREMENTS.md 3.3, added 2026-09-13 per Gerry; find/pirep/rtb added
+    2026-10-26). Repeatable per sortie -- e.g. multiple grids searched, or
+    periodic ops checks, not just one of each. `waypoint_type` (which of
+    in_grid/out_grid/ops_check/find/pirep/rtb this is) lives on the linked
+    TrackingEvent, not duplicated here. `raw_input`/`location_method` preserve
+    exactly what the user entered even after resolving to lat/lon for map display
+    (accountability).
 
-    `altitude_ft`/`fuel_remaining_hours`/`fuel_remaining_minutes`/`comments` are
-    Operations Check-specific (per Gerry, 2026-09-13) -- left null for in_grid/
-    out_grid entries, which only carry a location. `comments` is Text, not a
-    bounded VARCHAR, per Gerry: "nominally ~200 chars but could be longer, and
-    might eventually need an even bigger free-text block" -- a bounded column
-    already caused a real truncation crash once this session (SpecialUseAirspace's
-    times_of_use), not repeating that here."""
+    `altitude_ft`/`fuel_remaining_hours`/`fuel_remaining_minutes`/`comments` were
+    originally Operations-Check-specific (per Gerry, 2026-09-13); widened 2026-10-26
+    to also populate for in_grid/out_grid/find/pirep/rtb per Gerry's exact
+    per-type field list for the comms quick-select menu (app/api/sorties.py's
+    waypoint route docstring has the authoritative per-type mapping) -- still left
+    null for any type that doesn't ask for that particular field. `comments` is
+    Text, not a bounded VARCHAR, per Gerry: "nominally ~200 chars but could be
+    longer, and might eventually need an even bigger free-text block" -- a bounded
+    column already caused a real truncation crash once this session
+    (SpecialUseAirspace's times_of_use), not repeating that here.
+
+    `ete_hours`/`ete_minutes` (added 2026-10-26) are RTB-specific: a pilot's
+    point-in-time estimated time enroute back to base, given over the radio --
+    same hours+minutes convention as fuel_remaining_*, and deliberately distinct
+    from Sortie.ete_hours (the planned/filed value set once at sortie start).
+
+    `pirep_report` (added 2026-10-26) is PIREP-specific, deliberately a
+    separate column from `comments` rather than reusing it: per Gerry, a
+    PIREP's own free text IS meant to have a real, DB-enforced bound --
+    "PIREPs are usually short and regardless can be condensed" -- VARCHAR(500),
+    not Text. Keeping it a separate column means that bound applies only to
+    PIREP, not to every other type's `comments` (which deliberately stays
+    unbounded Text, see above -- the prior truncation-crash lesson still
+    applies to those)."""
 
     __tablename__ = "sortie_waypoints"
 
@@ -338,7 +433,10 @@ class SortieWaypoint(Base):
     altitude_ft: Mapped[float | None] = mapped_column(Float)
     fuel_remaining_hours: Mapped[int | None] = mapped_column()
     fuel_remaining_minutes: Mapped[int | None] = mapped_column()
+    ete_hours: Mapped[int | None] = mapped_column()
+    ete_minutes: Mapped[int | None] = mapped_column()
     comments: Mapped[str | None] = mapped_column(Text)
+    pirep_report: Mapped[str | None] = mapped_column(String(500))
 
     sortie: Mapped["Sortie"] = relationship(back_populates="waypoints")
     event: Mapped["TrackingEvent"] = relationship(lazy="selectin")
@@ -482,6 +580,12 @@ class User(Base):
     totp_secret: Mapped[str] = mapped_column(String(64))
     display_name: Mapped[str] = mapped_column(String(100))
     active: Mapped[bool] = mapped_column(default=True)
+    # Gates app/api/registration.py's pending-request review routes (added
+    # 2026-11-02, once a real outbound mail relay was confirmed available on
+    # r815 -- see RegistrationRequest below). Defaults false; nobody starts as
+    # an admin, Gerry's own account is flipped true by a one-off script after
+    # the migration runs, same pattern as scripts/backfill_legacy_mission.py.
+    is_admin: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     memberships: Mapped[list["MissionMembership"]] = relationship(back_populates="user", lazy="selectin")
@@ -501,6 +605,45 @@ class UserSession(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RegistrationStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    denied = "denied"
+
+
+class RegistrationRequest(Base):
+    """A self-submitted request for an AvTrack account (REQUIREMENTS.md 3.7
+    follow-up, added 2026-11-02). Per Gerry: request-then-approve, not open
+    self-registration -- a prospective user submits this themselves, an
+    `is_admin` User approves or denies it, and only on approval do they get a
+    one-time emailed link (`setup_token`) to set their own password and enroll
+    their own TOTP (app/api/registration.py's setup routes). The real `User`
+    row isn't created until that setup link is actually completed -- an
+    approved-but-never-completed request is harmless, just inert.
+
+    `email` exists only here, not on `User` -- nothing else in this app sends
+    mail to a user directly, this is the one place an address is needed (to
+    deliver the setup link), and per User's own docstring, login identity
+    stays CAP ID, not email."""
+
+    __tablename__ = "registration_requests"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    cap_id: Mapped[str] = mapped_column(String(20), index=True)
+    display_name: Mapped[str] = mapped_column(String(100))
+    email: Mapped[str] = mapped_column(String(255))
+    note: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[RegistrationStatus] = mapped_column(
+        Enum(RegistrationStatus), default=RegistrationStatus.pending
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    setup_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    setup_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    setup_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Mission(Base):

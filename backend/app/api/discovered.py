@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import optional_mission_member
 from app.db import get_session
-from app.integrations.adsb_discovery import haversine_nm
+from app.integrations.adsb_discovery import CANDIDATE_STALE_CUTOFF, haversine_nm
 from app.integrations.wing_lookup import wing_hint_for_callsign
 from app.models import Aircraft, AircraftCallsign, DiscoveredCallsign, MissionAircraft, OperationsArea
 from app.schemas import AircraftOut, DiscoveredCallsignOut, OperationsAreaIn, OperationsAreaOut
@@ -44,8 +44,8 @@ async def list_discovered(
     ao_filter: bool = Query(True, description="If false, ignore the AO and return all non-dismissed candidates nationwide"),
     session: AsyncSession = Depends(get_session),
 ):
-    """Active (non-dismissed) discovered CAP/PARD candidates, AO-filtered by
-    default. AO membership is computed here at read time, not stored -- see
+    """Active (non-dismissed), not-stale discovered CAP/PARD candidates, AO-filtered
+    by default. AO membership is computed here at read time, not stored -- see
     DiscoveredCallsign's docstring for why.
 
     `ao_filter=false` (added 2026-10-15, used by the map's always-on candidate
@@ -54,9 +54,28 @@ async def list_discovered(
     flying [regardless of our ongoing operation]... they'd not be in an
     operations table." General map situational awareness is unscoped; only the
     Ops Board's actionable alert list (the default, AO-scoped behavior here)
-    is operation-specific."""
+    is operation-specific. Per Gerry, 2026-10-18 -- no AO/mission set is NOT a
+    reason to hide this list: "we should SEE all airborne aircraft, just not
+    have them registered" -- so there's deliberately no fail-closed fallback here.
+
+    Staleness cutoff (CANDIDATE_STALE_CUTOFF, added 2026-10-18) applies regardless
+    of ao_filter: found live that this had no recency filter at all, so a sighting
+    nobody dismissed could linger for weeks (confirmed: 194 undismissed rows, oldest
+    33 days stale, only 60 under 24h). 12h per Gerry: reasonable for "is this still
+    a live concern." """
     await optional_mission_member(mission_id, request, session)
-    rows = (await session.execute(select(DiscoveredCallsign).where(DiscoveredCallsign.dismissed_at.is_(None)))).scalars().all()
+    cutoff = datetime.now(timezone.utc) - CANDIDATE_STALE_CUTOFF
+    rows = (
+        (
+            await session.execute(
+                select(DiscoveredCallsign).where(
+                    DiscoveredCallsign.dismissed_at.is_(None), DiscoveredCallsign.last_seen_at >= cutoff
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     # Display-only wing-name hint (app/integrations/wing_lookup.py, added
     # 2026-10-18) -- set as a plain attribute, not a DB column; see
     # api/aircraft.py's list_aircraft for the identical pattern.

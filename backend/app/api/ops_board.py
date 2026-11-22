@@ -72,7 +72,12 @@ async def get_ops_board(
     query = (
         select(Sortie, Aircraft)
         .join(Aircraft, Aircraft.id == Sortie.aircraft_id)
-        .where(Sortie.created_at >= cutoff)
+        # cancelled_at added 2026-10-19 (WMIRS import, REQUIREMENTS.md 3.3) --
+        # a cancelled sortie never flew and never will; it has no board-relevant
+        # state left to show and would otherwise misleadingly land in "planned"
+        # below. list_sorties() still shows it in history; this board just
+        # doesn't carry dead rows.
+        .where(Sortie.created_at >= cutoff, Sortie.cancelled_at.is_(None))
     )
     if mission_id is not None:
         query = query.where(Sortie.mission_id == mission_id)
@@ -133,8 +138,18 @@ async def get_ops_board(
         # State naming matches the sidebar's existing convention exactly
         # (STATE_LABEL in main.js: airborne/ground/"not-reporting") plus "complete",
         # not a second inconsistent naming scheme for the same concept.
+        #
+        # "planned" added 2026-10-19 (WMIRS import) -- MUST be checked before the
+        # not-reporting fallback: a never-started planned sortie has no atd_utc
+        # and no position, and without this branch it fell through to
+        # "not-reporting," which reads as a lost-contact alert rather than "hasn't
+        # launched yet." The overdue/no-contact/missing flags below don't need a
+        # matching guard -- a planned sortie already has no eta_utc/
+        # last_ops_normal_utc, so they naturally stay False.
         if ata_utc is not None:
             state = "complete"
+        elif atd_utc is None:
+            state = "planned"
         elif position is not None and position.altitude_ft is not None and position.altitude_ft > 0:
             state = "airborne"
         elif position is not None:

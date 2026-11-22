@@ -1,9 +1,10 @@
 """Ingest endpoint for the r815 FDPS relay (deploy/fdps_relay.py, REQUIREMENTS.md 3.5).
 
 The relay does a cheap text pre-filter and forwards raw FIXM/NAS XML here; this is
-where the real parsing and Aircraft matching happens, deliberately kept on cosp1
-rather than on r815 (keeps r815's piece genuinely lightweight, and keeps all the
-actual business logic in one place with the rest of the backend).
+where the real parsing and Aircraft matching happens, deliberately kept with the
+rest of the backend's business logic rather than duplicated into the relay script
+itself (backend moved from cosp1 to r815 2026-11-01; the relay now forwards to the
+backend on the same host instead of across the LAN -- see fdps_relay.py).
 
 Matches the same "don't trust provider flight-boundary/status fields" principle as
 app/adsb/flightaware.py: this endpoint only ever writes what FDPS reports as a
@@ -33,8 +34,8 @@ router = APIRouter(prefix="/api/swim", tags=["swim"])
 async def ingest(request: Request, session: AsyncSession = Depends(get_session)):
     """Body is raw FIXM/NAS XML (one MessageCollection), Content-Type: application/xml.
     Not authenticated -- relies on this endpoint only being reachable from the LAN
-    (192.168.0.57 isn't internet-exposed; only the r815 proxy is, and it doesn't
-    proxy this path). Revisit if that stops being true."""
+    (the backend binds 192.168.0.200:8000, not the public interface; the public
+    Apache vhost doesn't proxy this path either). Revisit if that stops being true."""
     body = (await request.body()).decode("utf-8", errors="replace")
     try:
         positions = parse_fixm_positions(body)

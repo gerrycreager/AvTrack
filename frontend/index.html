@@ -6,8 +6,28 @@
   <title>AvTrack</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
   <style>
-    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    /* overflow: hidden here is load-bearing, not cosmetic -- found live 2026-10-25:
+       without it, an overflowing #layers-panel (left menu) makes the document itself
+       the scroll container, and #map (position: absolute, anchored to that same
+       unbounded body) scrolls away with it instead of staying fixed. See
+       #layers-panel's own max-height/overflow-y below, which is the other half of
+       the fix: that panel scrolls *internally* now instead of overflowing the page. */
+    html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, sans-serif; }
     #map { position: absolute; inset: 0; }
+    /* ADS-B data-source attribution (REQUIREMENTS.md 3.5, added 2026-10-24) --
+       adsb.lol (ODbL 1.0), adsb.fi ("must cite ... and include a link to our home
+       page"), and OpenSky Network (license scope covers non-profit/government use,
+       asks that the project name/URL be mentioned where appropriate) each carry
+       their own attribution expectation, and none of this app's existing MapLibre
+       source attributions cover them (those are for basemap tiles only -- ADS-B
+       data never becomes a MapLibre source). bottom-left, distinct from MapLibre's
+       own bottom-right attribution control so the two don't overlap. */
+    #data-attribution {
+      position: absolute; bottom: 4px; left: 4px; z-index: 5;
+      font-size: 10px; color: #9aa4ad; background: rgba(10, 12, 14, 0.6);
+      padding: 2px 6px; border-radius: 3px;
+    }
+    #data-attribution a { color: #9aa4ad; }
     #panel {
       /* Narrowed 2026-09-13: the row template only shows callsign + alt/speed now,
          not the tail number, so less horizontal space is needed. */
@@ -16,6 +36,20 @@
       box-sizing: border-box; padding: 12px; z-index: 1;
     }
     #panel h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4ad; margin: 4px 0 8px; }
+    /* Aircraft Aloft / Mission Status toggle (added 2026-10-26) -- the right
+       column was single-purpose (roster-only); this reuses the existing Ops
+       Board data for a second, persistent view without duplicating it. */
+    #panel-mode-toggle, .panel-mode-toggle { display: flex; gap: 4px; margin-bottom: 8px; }
+    .panel-mode-btn {
+      flex: 1; padding: 5px 2px; border-radius: 4px; border: 1px solid #3a4048;
+      background: #262b31; color: #9aa4ad; cursor: pointer; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .panel-mode-btn.active { background: #2b6cb0; color: white; border-color: #2b6cb0; }
+    .mission-status-row { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; background: #262b31; font-size: 12px; cursor: pointer; }
+    .mission-status-row .top-line { font-weight: 600; display: flex; justify-content: space-between; gap: 6px; }
+    .mission-status-row .meta { color: #9aa4ad; font-size: 11px; margin-top: 2px; }
+    .mission-status-row .alert { color: #ff6b6b; }
     /* Mission roster upload (REQUIREMENTS.md 3.1, added 2026-09-13) -- additive-only
        CSV upload, distinct from the standing monthly wing-wide import (a CLI script,
        scripts/import_callsign_tails.py, not web-exposed). Panel is only 190px wide,
@@ -25,7 +59,7 @@
     #roster-upload-row input[type="file"] { width: 100%; font-size: 10px; color: #e8eaed; margin-bottom: 4px; }
     #roster-upload-row button { width: 100%; padding: 4px; border-radius: 4px; border: none; background: #2b6cb0; color: white; cursor: pointer; font-size: 11px; }
     #roster-upload-status { font-size: 10px; color: #9aa4ad; margin-bottom: 8px; min-height: 1.2em; }
-    .aircraft-row { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; background: #262b31; font-size: 13px; }
+    .aircraft-row { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; background: #262b31; font-size: 13px; cursor: pointer; }
     .aircraft-row.unlisted { background: #4a2a1a; border: 1px solid #d98a3d; }
     .aircraft-row.state-not-reporting { opacity: 0.55; } /* loaded but quiet -- de-emphasize vs. live rows */
     .aircraft-row .callsign { font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
@@ -37,6 +71,22 @@
     .status-badge.status-complete { background: #1a3a5c; color: #bcdcff; }
     .wing-hint { font-weight: 400; font-size: 10px; color: #9aa4ad; } /* display-only, see wing_lookup.py */
     .aircraft-row-actions { display: flex; align-items: center; gap: 4px; }
+    /* Discovered (not-yet-roster) rows in Aircraft Aloft (added 2026-11-02 per
+       Gerry: the roster-only view rarely matched what was actually flying) --
+       same amber/dashed "not yet part of this operation" language as the
+       discovered map markers, not clickable (no sortie panel exists for an
+       untracked tail) -- Approve adds it to the roster right from this row. */
+    .aircraft-row.discovered { background: rgba(90, 50, 10, 0.45); border: 1px dashed #ff9800; cursor: default; }
+    .status-badge.status-discovered { background: transparent; color: #ffb74d; border: 1px solid #ff9800; }
+    /* Found live 2026-11-02 (Gerry): crammed into the callsign line next to the
+       DISCOVERED badge, "Approve" ran off #panel's 190px width. Own full-width
+       line instead, same shape as #sortie-panel's .sortie-action-btn. */
+    .aloft-approve-btn {
+      display: block; width: 100%; box-sizing: border-box; margin-top: 5px;
+      padding: 4px; font-size: 11px; border-radius: 3px; border: 1px solid #ff9800;
+      background: transparent; color: #ffb74d; cursor: pointer;
+    }
+    .aloft-approve-btn:hover { background: #ff9800; color: #1c2126; }
     .aircraft-remove-btn { font-size: 10px; line-height: 1; padding: 1px 5px; cursor: pointer; border-radius: 3px; border: 1px solid #3a4048; background: #262b31; color: #e8eaed; }
     .aircraft-remove-btn:hover { background: #5a2a2a; border-color: #d9534f; }
     .mission-join-row:hover { background: #2a333c; }
@@ -141,6 +191,9 @@
       position: absolute; top: 50px; left: 10px; z-index: 1; width: 210px;
       background: rgba(20, 24, 28, 0.92); color: #e8eaed; border-radius: 6px;
       padding: 10px 12px; box-sizing: border-box; font-size: 12px;
+      /* Bounded + scrollable on its own (found live 2026-10-25) -- see the
+         html/body overflow:hidden comment above for why this matters. */
+      max-height: calc(100% - 60px); overflow-y: auto;
     }
     #layers-panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4ad; margin: 0 0 6px; }
     #layers-panel .divider { border-top: 1px solid #3a4048; margin: 10px 0; }
@@ -240,6 +293,8 @@
       background: transparent; color: #6fa8dc; cursor: pointer;
     }
     #sortie-panel .log-buttons button:hover { background: #2b6cb0; color: white; }
+    #sortie-panel .log-buttons button.active { background: #2b6cb0; color: white; border-color: #2b6cb0; }
+    #sortie-panel .comms-form-header { background: #1c2126; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
     .event-row { background: #262b31; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; font-size: 12px; }
     .event-row .event-type { font-weight: 600; text-transform: uppercase; font-size: 11px; }
     .event-row .event-time { color: #cdd3d8; }
@@ -284,11 +339,17 @@
       width: 100%; box-sizing: border-box; font-size: 12px; padding: 4px; border-radius: 3px;
       border: 1px solid #444; background: #14181c; color: #e8eaed; resize: vertical; margin-bottom: 6px;
     }
+    /* PIREP length counter (REQUIREMENTS.md, added 2026-10-26) -- advisory, not a hard
+       stop; typing past 500 is still allowed so nothing gets silently cut off mid-sentence,
+       but the counter turns amber/red to prompt the caller to summarize before submitting. */
+    #sortie-panel .pirep-counter { font-size: 10px; color: #9aa4ad; text-align: right; margin: -4px 0 6px; }
+    #sortie-panel .pirep-counter.over-limit { color: #d9534f; font-weight: 600; }
     #sortie-panel summary { cursor: pointer; color: #9aa4ad; font-size: 11px; margin: 8px 0; }
   </style>
 </head>
 <body>
   <div id="map"></div>
+  <div id="data-attribution">ADS-B data: <a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a> &middot; <a href="https://adsb.fi" target="_blank" rel="noopener">adsb.fi</a> &middot; <a href="https://opensky-network.org" target="_blank" rel="noopener">OpenSky Network</a></div>
   <div id="login-overlay" hidden>
     <form id="login-form">
       <h2>AvTrack Login</h2>
@@ -297,6 +358,9 @@
       <label>Authenticator code<br/><input type="text" id="login-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required /></label>
       <button type="submit">Log In</button>
       <div id="login-error"></div>
+      <div style="font-size:11px; text-align:center; margin-top:4px;">
+        <a href="/request-access.html" target="_blank" rel="noopener" style="color:#6fa8dc;">Don't have an account? Request access.</a>
+      </div>
     </form>
   </div>
   <div id="user-badge" hidden>
@@ -312,18 +376,31 @@
     <input id="jump-input" placeholder="Callsign or tail — Enter" title="Jump straight to an aircraft's sortie panel, even before it has a live position" style="width:150px;" />
     <span style="color:#666; align-self:center; font-size:14px; margin-left:6px;">|</span>
     <button id="ops-board-toggle" title="Air Ops Status Board (AOBD)">Ops Board</button>
+    <span style="color:#666; align-self:center; font-size:14px; margin-left:6px;">|</span>
+    <a href="/quickstart.html" target="_blank" rel="noopener" style="align-self:center; font-size:12px; color:#6fa8dc; text-decoration:none; padding:0 4px;" title="Quick-start guide and full user manual">? Help</a>
   </div>
   <div id="basemap-switcher">
     <select id="basemap-select">
       <option value="topo" selected>Terrain (USGS Topo)</option>
       <option value="streets">Streets</option>
       <option value="imagery">Imagery</option>
+      <option value="hybrid">Hybrid (Imagery + Streets)</option>
+      <option value="sectional">VFR Sectional</option>
     </select>
     <label style="color:#e8eaed; font-size:12px; background:rgba(20,24,28,0.85); padding:5px 8px; border-radius:4px; margin-left:6px;">
       <input type="checkbox" id="labels-toggle" checked /> Airfield labels
     </label>
   </div>
   <div id="layers-panel">
+    <!-- Top of the always-visible left panel, per Gerry 2026-11-02 -- more
+         prominent than the existing "? Help" link in the top search bar,
+         which is easy to miss alongside the locate/jump/Ops Board controls. -->
+    <div id="help-links" style="font-size:11px; margin-bottom:8px;">
+      <a href="/quickstart.html" target="_blank" rel="noopener" style="color:#6fa8dc; text-decoration:none;">Quick-Start</a>
+      <span style="color:#666;"> · </span>
+      <a href="/manual.html" target="_blank" rel="noopener" style="color:#6fa8dc; text-decoration:none;">User Manual</a>
+      <span id="admin-requests-link" hidden><span style="color:#666;"> · </span><a href="/admin-requests.html" target="_blank" rel="noopener" style="color:#6fa8dc; text-decoration:none;">Account Requests</a></span>
+    </div>
     <h3>Airspace</h3>
     <label><input type="checkbox" id="sua-prohib-toggle" /> <span class="swatch" style="background:#cc0000;"></span>Prohibited</label>
     <label><input type="checkbox" id="sua-restrict-toggle" /> <span class="swatch" style="background:#dc6400;"></span>Restricted</label>
@@ -337,7 +414,7 @@
     <div class="divider"></div>
     <h3>Mission Layers</h3>
     <div id="gis-upload-row">
-      <input type="file" id="gis-upload-input" accept=".zip,.kml,.kmz,.geojson,.json" />
+      <input type="file" id="gis-upload-input" accept=".zip,.kml,.kmz" title="KML/KMZ, zipped Shapefile, or zipped File Geodatabase -- points, lines, or polygons (e.g. reporting points or a search-area boundary)" />
       <button id="gis-upload-btn">Add</button>
     </div>
     <div id="gis-layers-list"><em style="color:#9aa4ad;">None uploaded</em></div>
@@ -347,6 +424,9 @@
       <select id="mission-select" style="width:100%; box-sizing:border-box; padding:4px; border-radius:3px; border:1px solid #444; background:#14181c; color:#e8eaed; font-size:12px;">
         <option value="">— none (legacy / unscoped) —</option>
       </select>
+    </div>
+    <div id="mission-select-hint" class="mission-number-hint">
+      Select a mission above to manage it — leave, close, reopen, members.
     </div>
     <label style="font-size:11px; color:#9aa4ad; display:block; margin-bottom:4px;">
       <input type="checkbox" id="mission-show-closed-toggle" /> Show closed missions
@@ -396,18 +476,25 @@
     </button>
   </div>
   <div id="panel">
-    <h2>Aircraft Aloft</h2>
+    <div id="panel-mode-toggle">
+      <button id="panel-mode-aloft-btn" class="panel-mode-btn active">Aircraft Aloft</button>
+      <button id="panel-mode-status-btn" class="panel-mode-btn">Mission Status</button>
+    </div>
     <div id="roster-upload-row">
       <input type="file" id="roster-upload-input" accept=".csv" title="Upload mission roster CSV (tail_number,callsign,callsign_prefix) -- adds to the tracked list, never removes" />
       <button id="roster-upload-btn">Add</button>
     </div>
     <div id="roster-upload-status"></div>
     <div id="aircraft-list"><em>Connecting…</em></div>
+    <div id="mission-status-list" hidden></div>
   </div>
   <div id="sortie-panel" hidden>
     <button class="close-btn" id="sortie-close">✕</button>
     <h2 id="sortie-title">—</h2>
     <div class="sub" id="sortie-subtitle"></div>
+    <div class="sub">
+      <label><input type="checkbox" id="track-toggle"> Show track (last 8 hrs)</label>
+    </div>
     <div class="sub">
       Display timezone:
       <select id="tz-select">
@@ -431,9 +518,7 @@
     </details>
 
     <details>
-      <summary>Raw event log (engine start/stop, takeoff, touch-and-go, landing)</summary>
-      <div id="log-event-time-field"></div>
-      <div class="log-buttons" id="sortie-log-buttons"></div>
+      <summary>Event history (correct a logged time after the fact)</summary>
       <div id="sortie-events"><em>Loading…</em></div>
     </details>
   </div>

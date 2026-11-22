@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Request AvTrack Access</title>
+<style>
+  :root { --bg: #14181c; --panel: #1c2126; --text: #e8eaed; --muted: #9aa4ad; --accent: #2b6cb0; --accent2: #6fa8dc; --border: #3a4048; --err: #ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  main { width: 360px; max-width: 92vw; padding: 24px; }
+  a { color: var(--accent2); }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); font-size: 13px; margin-top: 0; }
+  form { background: var(--panel); padding: 20px 22px; border-radius: 8px; display: flex; flex-direction: column; gap: 12px; }
+  label { font-size: 12px; }
+  input, textarea { width: 100%; box-sizing: border-box; padding: 7px; margin-top: 4px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-family: inherit; font-size: 13px; }
+  textarea { resize: vertical; min-height: 54px; }
+  button { padding: 9px; border-radius: 4px; border: none; background: var(--accent); color: white; cursor: pointer; font-size: 13px; }
+  button:hover { background: #3579c4; }
+  #msg { font-size: 13px; min-height: 16px; }
+  #msg.error { color: var(--err); }
+  #msg.ok { color: #7fd99a; }
+  .back { font-size: 12px; margin-top: 14px; display: block; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Request AvTrack Access</h1>
+  <p class="sub">Submit your CAP ID and we'll review it. You'll get an email to finish setting up your account once it's approved.</p>
+  <form id="request-form">
+    <label>CAP ID<br/><input type="text" id="cap-id" required /></label>
+    <label>Name<br/><input type="text" id="display-name" required /></label>
+    <label>Email<br/><input type="email" id="email" required pattern=".+@(cap\.gov|capnhq\.gov)" title="Must be a cap.gov or capnhq.gov address" />
+      <span style="color:#9aa4ad; font-size:11px;">Must be a cap.gov or capnhq.gov address. No cap.gov/capnhq.gov email? Contact an admin for an exception.</span>
+    </label>
+    <label>Note (optional)<br/><textarea id="note" placeholder="Unit / mission / why you need access"></textarea></label>
+    <button type="submit">Submit Request</button>
+    <div id="msg"></div>
+  </form>
+  <a class="back" href="/">&larr; Back to the map</a>
+</main>
+<script>
+  document.getElementById("request-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById("msg");
+    msg.textContent = "";
+    msg.className = "";
+    const body = {
+      cap_id: document.getElementById("cap-id").value.trim(),
+      display_name: document.getElementById("display-name").value.trim(),
+      email: document.getElementById("email").value.trim(),
+      note: document.getElementById("note").value.trim() || null,
+    };
+    try {
+      const res = await fetch("/api/registration/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        msg.textContent = err.detail ?? "Could not submit the request.";
+        msg.className = "error";
+        return;
+      }
+      document.getElementById("request-form").innerHTML =
+        "<p>Request submitted. You'll get an email with a setup link once it's approved.</p>";
+    } catch (err) {
+      msg.textContent = "Could not reach the server. Try again.";
+      msg.className = "error";
+    }
+  });
+</script>
+</body>
+</html>

@@ -19,15 +19,46 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.events import _effective_time, _get_aircraft_or_404, _to_event_out
-from app.auth import optional_mission_member
+from app.auth import optional_mission_member, require_time_logging_permission
 from app.db import get_session
-from app.models import DetectionMethod, EventType, Mission, Sortie, SortieWaypoint, TrackingEvent, WaypointLocationMethod
-from app.schemas import SortieCreateIn, SortieOut, SortiePatchIn, SortieStopIn, WaypointCreateIn, WaypointOut
+from geoalchemy2.shape import to_shape
+
+from app.models import (
+    Aircraft,
+    DetectionMethod,
+    EventType,
+    Mission,
+    Position,
+    Sortie,
+    SortieWaypoint,
+    TrackingEvent,
+    WaypointLocationMethod,
+)
+from app.schemas import (
+    PositionOut,
+    SortieCreateIn,
+    SortieOut,
+    SortiePatchIn,
+    SortieStartIn,
+    SortieStopIn,
+    WaypointCreateIn,
+    WaypointOut,
+)
 
 router = APIRouter(tags=["sorties"])
 _mgrs = mgrs.MGRS()
 
-WAYPOINT_TYPES = {EventType.in_grid, EventType.out_grid, EventType.ops_check}
+# find/pirep/rtb added 2026-10-26 for the comms quick-select menu
+# (REQUIREMENTS.md 3.3) -- same repeatable-waypoint mechanism as
+# in_grid/out_grid/ops_check, just three more EventType values.
+WAYPOINT_TYPES = {
+    EventType.in_grid,
+    EventType.out_grid,
+    EventType.ops_check,
+    EventType.find,
+    EventType.pirep,
+    EventType.rtb,
+}
 
 
 def _to_waypoint_out(wp: SortieWaypoint) -> WaypointOut:
@@ -42,7 +73,10 @@ def _to_waypoint_out(wp: SortieWaypoint) -> WaypointOut:
         altitude_ft=wp.altitude_ft,
         fuel_remaining_hours=wp.fuel_remaining_hours,
         fuel_remaining_minutes=wp.fuel_remaining_minutes,
+        ete_hours=wp.ete_hours,
+        ete_minutes=wp.ete_minutes,
         comments=wp.comments,
+        pirep_report=wp.pirep_report,
     )
 
 
@@ -65,6 +99,7 @@ def _to_sortie_out(sortie: Sortie) -> SortieOut:
         sortie_number=sortie.sortie_number,
         mission_number=sortie.mission_number,
         pic_name=sortie.pic_name,
+        pic_cap_id=sortie.pic_cap_id,
         engine_start_utc=engine_start_utc,
         engine_stop_utc=_effective_time(sortie.engine_stop_event) if sortie.engine_stop_event else None,
         takeoff_utc=_effective_time(sortie.takeoff_event) if sortie.takeoff_event else None,
@@ -76,6 +111,12 @@ def _to_sortie_out(sortie: Sortie) -> SortieOut:
         eta_utc=_compute_eta_utc(sortie, engine_start_utc),
         overdue_threshold_minutes=sortie.overdue_threshold_minutes,
         assigned_area=sortie.assigned_area,
+        status=sortie.effective_status(),
+        wmirs_sortie_id=sortie.wmirs_sortie_id,
+        planned_date=sortie.planned_date,
+        departure_raw=sortie.departure_raw,
+        destination_raw=sortie.destination_raw,
+        cancelled_at=sortie.cancelled_at,
     )
 
 
@@ -131,8 +172,12 @@ async def create_sortie(
     sending it. When given, the new sortie is tagged with it, and
     mission_number defaults from Mission.mission_number when the caller
     didn't type one in -- still independently editable afterward, same as
-    before."""
-    await optional_mission_member(mission_id, request, session)
+    before.
+
+    Gated by require_time_logging_permission (COMMS/AOBD/IC/Ops only, added
+    2026-10-26), not plain optional_mission_member -- this route logs the
+    sortie's engine_start time, same as the comms quick-select menu."""
+    await require_time_logging_permission(mission_id, request, session)
     aircraft = await _get_aircraft_or_404(tail_number, session)
     start_event = TrackingEvent(
         aircraft_id=aircraft.id,
@@ -155,6 +200,7 @@ async def create_sortie(
         sortie_number=body.sortie_number,
         mission_number=mission_number,
         pic_name=body.pic_name,
+        pic_cap_id=body.pic_cap_id,
         engine_start_event_id=start_event.id,
         ete_hours=body.ete_hours,
         assigned_area=body.assigned_area,
@@ -217,16 +263,119 @@ async def current_sortie(
     return _to_sortie_out(sortie)
 
 
-@router.post("/api/sorties/{sortie_id}/stop", response_model=SortieOut)
-async def stop_sortie(sortie_id: str, body: SortieStopIn, session: AsyncSession = Depends(get_session)):
+TRACK_WINDOW = timedelta(hours=8)  # per Gerry, 2026-10-24 -- flat window, not "since takeoff"
+
+
+@router.get("/api/aircraft/{tail_number}/track", response_model=list[PositionOut])
+async def aircraft_track(
+    tail_number: str,
+    request: Request,
+    mission_id: UUID | None = Query(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Selectable flight track/trail for the map (REQUIREMENTS.md 3.1, added
+    2026-10-24 per Gerry) -- every Position row for this tail in the last
+    TRACK_WINDOW, oldest first, so the frontend can draw it as a single
+    polyline without re-sorting. Not mission-scoped data in any real sense
+    (a Position isn't tied to a Mission) -- mission_id here only gates access
+    the same transitional way every other per-tail route does (see
+    app/auth.py's optional_mission_member), not filtering content."""
+    await optional_mission_member(mission_id, request, session)
+    aircraft = await _get_aircraft_or_404(tail_number, session)
+    result = await session.execute(
+        select(Position)
+        .where(Position.aircraft_id == aircraft.id)
+        .where(Position.ts_utc > datetime.now(timezone.utc) - TRACK_WINDOW)
+        .order_by(Position.ts_utc.asc())
+    )
+    positions = result.scalars().all()
+    return [
+        PositionOut(
+            tail_number=aircraft.tail_number,
+            callsign=aircraft.callsign,
+            ts_utc=p.ts_utc,
+            latitude=to_shape(p.location).y,
+            longitude=to_shape(p.location).x,
+            altitude_ft=p.altitude_ft,
+            ground_speed_kt=p.ground_speed_kt,
+            heading_deg=p.heading_deg,
+        )
+        for p in positions
+    ]
+
+
+@router.post("/api/sorties/{sortie_id}/start", response_model=SortieOut)
+async def start_sortie(
+    sortie_id: str, body: SortieStartIn, request: Request, session: AsyncSession = Depends(get_session)
+):
+    """Promotes an existing `planned` sortie (created by the WMIRS importer,
+    app/api/wmirs_import.py) to `active` by logging its engine_start event on
+    THIS row -- not create_sortie(), which always makes a brand-new row.
+    create_sortie() stays the walk-up/no-WMIRS-plan path, unchanged. This is
+    what the "first call" radio check-in resolves to once Callsign/Sortie ID/
+    Pilot/Destination/ETE are confirmed against the planned row (REQUIREMENTS.md
+    3.3, added 2026-10-19) -- and, since 2026-10-26, what the comms quick-select
+    menu's Engine Start button actually calls for an already-existing (e.g.
+    WMIRS-planned) sortie, rather than the generic events route.
+
+    Gated by require_time_logging_permission using the SORTIE's own mission_id
+    (added 2026-10-26), not a client-supplied one -- can't be spoofed by
+    passing a different mission_id than the sortie actually belongs to."""
     sortie = await _get_sortie_or_404(sortie_id, session)
+    await require_time_logging_permission(sortie.mission_id, request, session)
+    if sortie.effective_status() != "planned":
+        raise HTTPException(409, f"Sortie is {sortie.effective_status()}, not planned -- cannot start")
+    start_event = TrackingEvent(
+        aircraft_id=sortie.aircraft_id,
+        sortie_id=sortie.id,
+        event_type=EventType.engine_start,
+        event_time_utc=body.engine_start_utc or datetime.now(timezone.utc),
+        detected_by=DetectionMethod.manual,
+        raw={"logged_by": body.logged_by, "comments": body.comments} if body.comments else {"logged_by": body.logged_by},
+    )
+    session.add(start_event)
+    await session.flush()
+    sortie.engine_start_event_id = start_event.id
+    await session.commit()
+    sortie = await _reload_sortie(sortie.id, session)
+    return _to_sortie_out(sortie)
+
+
+@router.post("/api/sorties/{sortie_id}/cancel", response_model=SortieOut)
+async def cancel_sortie(sortie_id: str, session: AsyncSession = Depends(get_session)):
+    """A planned sortie that "for some reason doesn't make" (Gerry) -- e.g. a
+    WMIRS-planned leg that gets scrubbed before it ever flies. Only legal while
+    still `planned`: a sortie that already flew needs stop_sortie, not this, and
+    one that's already cancelled is a no-op (idempotent, same convention as
+    Mission.close/DiscoveredCallsign.dismiss)."""
+    sortie = await _get_sortie_or_404(sortie_id, session)
+    status = sortie.effective_status()
+    if status == "cancelled":
+        return _to_sortie_out(sortie)
+    if status != "planned":
+        raise HTTPException(409, f"Sortie is {status}, not planned -- cannot cancel")
+    sortie.cancelled_at = datetime.now(timezone.utc)
+    await session.commit()
+    sortie = await _reload_sortie(sortie.id, session)
+    return _to_sortie_out(sortie)
+
+
+@router.post("/api/sorties/{sortie_id}/stop", response_model=SortieOut)
+async def stop_sortie(
+    sortie_id: str, body: SortieStopIn, request: Request, session: AsyncSession = Depends(get_session)
+):
+    """Gated by require_time_logging_permission (added 2026-10-26) using the
+    sortie's own mission_id -- also what the comms quick-select menu's Engine
+    Stop button calls, rather than the generic events route."""
+    sortie = await _get_sortie_or_404(sortie_id, session)
+    await require_time_logging_permission(sortie.mission_id, request, session)
     stop_event = TrackingEvent(
         aircraft_id=sortie.aircraft_id,
         sortie_id=sortie.id,
         event_type=EventType.engine_stop,
         event_time_utc=body.engine_stop_utc or datetime.now(timezone.utc),
         detected_by=DetectionMethod.manual,
-        raw={"logged_by": body.logged_by},
+        raw={"logged_by": body.logged_by, "comments": body.comments} if body.comments else {"logged_by": body.logged_by},
     )
     session.add(stop_event)
     await session.flush()
@@ -239,12 +388,28 @@ async def stop_sortie(sortie_id: str, body: SortieStopIn, session: AsyncSession 
 @router.patch("/api/sorties/{sortie_id}", response_model=SortieOut)
 async def patch_sortie(sortie_id: str, body: SortiePatchIn, session: AsyncSession = Depends(get_session)):
     sortie = await _get_sortie_or_404(sortie_id, session)
+    if body.tail_number is not None:
+        # Aircraft reassignment (REQUIREMENTS.md 3.3, added 2026-10-19) -- only
+        # while still planned. Covers both the "AOBD swaps the planned aircraft
+        # ahead of time" and "mismatch caught live at first-call" cases Gerry
+        # described (RPP precedent): same endpoint, two different UI triggers.
+        # Never allowed once engine_start is logged -- that's the aircraft of
+        # record for this sortie from then on.
+        if sortie.effective_status() != "planned":
+            raise HTTPException(409, f"Sortie is {sortie.effective_status()}, not planned -- cannot reassign aircraft")
+        tail = body.tail_number.strip().upper()
+        aircraft = (await session.execute(select(Aircraft).where(Aircraft.tail_number == tail))).scalar_one_or_none()
+        if aircraft is None:
+            raise HTTPException(404, f"No such aircraft '{tail}'")
+        sortie.aircraft_id = aircraft.id
     if body.sortie_number is not None:
         sortie.sortie_number = body.sortie_number
     if body.mission_number is not None:
         sortie.mission_number = body.mission_number
     if body.pic_name is not None:
         sortie.pic_name = body.pic_name
+    if body.pic_cap_id is not None:
+        sortie.pic_cap_id = body.pic_cap_id
     if body.ete_hours is not None:
         sortie.ete_hours = body.ete_hours
     if body.assigned_area is not None:
@@ -259,8 +424,14 @@ async def patch_sortie(sortie_id: str, body: SortiePatchIn, session: AsyncSessio
 
 
 @router.post("/api/sorties/{sortie_id}/waypoints", response_model=SortieOut)
-async def add_waypoint(sortie_id: str, body: WaypointCreateIn, session: AsyncSession = Depends(get_session)):
+async def add_waypoint(
+    sortie_id: str, body: WaypointCreateIn, request: Request, session: AsyncSession = Depends(get_session)
+):
+    """Gated by require_time_logging_permission (added 2026-10-26) using the
+    sortie's own mission_id -- every comms quick-select waypoint type
+    (in/out-grid, ops check, find, pirep, rtb) goes through this one route."""
     sortie = await _get_sortie_or_404(sortie_id, session)
+    await require_time_logging_permission(sortie.mission_id, request, session)
     try:
         waypoint_type = EventType(body.waypoint_type)
     except ValueError:
@@ -296,7 +467,10 @@ async def add_waypoint(sortie_id: str, body: WaypointCreateIn, session: AsyncSes
             altitude_ft=body.altitude_ft,
             fuel_remaining_hours=body.fuel_remaining_hours,
             fuel_remaining_minutes=body.fuel_remaining_minutes,
+            ete_hours=body.ete_hours,
+            ete_minutes=body.ete_minutes,
             comments=body.comments,
+            pirep_report=body.pirep_report,
         )
     )
     await session.commit()

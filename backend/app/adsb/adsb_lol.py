@@ -19,6 +19,18 @@ forks of the same lineage; sister project api.adsb.one publishes near-identical
 docs but blocked this environment's IP via Cloudflare -- adsb.lol had no such
 issue). No API key.
 
+CORRECTION 2026-10-24: an earlier version of this comment claimed adsb.fi
+(opendata.adsb.fi) was Cloudflare-blocked like api.adsb.one. That was wrong --
+it was our own bad URL (guessed `/v2/reg/...`, mirroring this module's path,
+which doesn't exist on adsb.fi) producing a bare empty 400, not a real block.
+adsb.fi's actual, documented path (github.com/adsbfi/opendata) is
+`/api/v2/registration/[reg]`, confirmed live and working -- see
+app/adsb/adsb_fi.py, built as a third concurrent provider once this was sorted
+out. Whether api.adsb.one's block (paragraph above, from 2026-09-12) was
+against its real documented endpoint shape or a similar bad guess has NOT been
+re-checked given this lesson -- worth re-verifying against adsb.one's own docs
+before trusting that one either.
+
 IMPORTANT -- one bulk call per poll cycle, not one call per tail: confirmed live
 2026-09-12 that `/v2/reg/` accepts a comma-separated list of registrations and
 returns all matches in a single response (`/v2/reg/N1,N2,N3` -> all matching
@@ -37,6 +49,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from app.adsb import rate_limit
 from app.adsb.base import ADSBProvider, AircraftPosition
 
 ADSB_LOL_BASE_URL = "https://api.adsb.lol"
@@ -52,11 +65,51 @@ MAX_POSITION_AGE = timedelta(minutes=15)
 logger = logging.getLogger(__name__)
 
 
+def _parse_one_readsb_v2(tail_number: str, ac: dict, max_age: timedelta) -> AircraftPosition | None:
+    """Shared by every provider in this readsb/ADSBExchange-v2-convention family --
+    currently adsb.lol and adsb.fi (app/adsb/adsb_fi.py), identical field shape on
+    both (confirmed live 2026-10-24). Factored out of AdsbLolProvider, which
+    originated it, rather than duplicated, once a second real consumer existed."""
+    seen_pos = ac.get("seen_pos")
+    if seen_pos is not None and timedelta(seconds=seen_pos) > max_age:
+        return None
+    if ac.get("lat") is None or ac.get("lon") is None:
+        # Present in the aggregator (e.g. MLAT-only or a stale ground record) but
+        # no usable position yet -- skip rather than guess.
+        return None
+
+    ts_utc = datetime.now(timezone.utc)
+    if seen_pos is not None:
+        ts_utc -= timedelta(seconds=seen_pos)
+
+    # alt_baro is either a number of feet, or the literal string "ground" when the
+    # aircraft is on the ground (a known field quirk in this API family) --
+    # confirmed against real live responses 2026-09-12.
+    alt_baro = ac.get("alt_baro")
+    altitude_ft = 0.0 if alt_baro == "ground" else alt_baro
+
+    flight = (ac.get("flight") or "").strip() or None  # padded to 8 chars in real responses
+
+    return AircraftPosition(
+        tail_number=tail_number,
+        callsign=flight,
+        ts_utc=ts_utc,
+        latitude=ac["lat"],
+        longitude=ac["lon"],
+        altitude_ft=altitude_ft,
+        ground_speed_kt=ac.get("gs"),
+        heading_deg=ac.get("track"),  # true track over ground, not magnetic heading -- close enough here
+        raw=ac,
+    )
+
+
 class AdsbLolProvider(ADSBProvider):
     name = "adsb_lol"
 
     async def get_positions(self, tail_numbers: list[str]) -> list[AircraftPosition]:
         if not tail_numbers:
+            return []
+        if rate_limit.adsb_lol.blocked():
             return []
         async with httpx.AsyncClient(
             base_url=ADSB_LOL_BASE_URL,
@@ -71,9 +124,15 @@ class AdsbLolProvider(ADSBProvider):
             try:
                 resp = await client.get(f"/v2/reg/{','.join(tail_numbers)}")
                 resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    rate_limit.adsb_lol.on_429()
+                logger.exception("adsb.lol bulk lookup failed for %d tails", len(tail_numbers))
+                return []
             except Exception:
                 logger.exception("adsb.lol bulk lookup failed for %d tails", len(tail_numbers))
                 return []
+            rate_limit.adsb_lol.on_success()
             aircraft_list = resp.json().get("ac") or []
 
         # Match results back to requested tails by registration, case/whitespace
@@ -84,40 +143,7 @@ class AdsbLolProvider(ADSBProvider):
             reg = (ac.get("r") or "").strip().upper()
             if reg not in wanted:
                 continue
-            position = self._parse_one(reg, ac)
+            position = _parse_one_readsb_v2(reg, ac, MAX_POSITION_AGE)
             if position is not None:
                 positions.append(position)
         return positions
-
-    def _parse_one(self, tail_number: str, ac: dict) -> AircraftPosition | None:
-        seen_pos = ac.get("seen_pos")
-        if seen_pos is not None and timedelta(seconds=seen_pos) > MAX_POSITION_AGE:
-            return None
-        if ac.get("lat") is None or ac.get("lon") is None:
-            # Present in the aggregator (e.g. MLAT-only or a stale ground record) but
-            # no usable position yet -- skip rather than guess.
-            return None
-
-        ts_utc = datetime.now(timezone.utc)
-        if seen_pos is not None:
-            ts_utc -= timedelta(seconds=seen_pos)
-
-        # alt_baro is either a number of feet, or the literal string "ground" when the
-        # aircraft is on the ground (a known field quirk in this API family) --
-        # confirmed against real live responses 2026-09-12.
-        alt_baro = ac.get("alt_baro")
-        altitude_ft = 0.0 if alt_baro == "ground" else alt_baro
-
-        flight = (ac.get("flight") or "").strip() or None  # padded to 8 chars in real responses
-
-        return AircraftPosition(
-            tail_number=tail_number,
-            callsign=flight,
-            ts_utc=ts_utc,
-            latitude=ac["lat"],
-            longitude=ac["lon"],
-            altitude_ft=altitude_ft,
-            ground_speed_kt=ac.get("gs"),
-            heading_deg=ac.get("track"),  # true track over ground, not magnetic heading -- close enough here
-            raw=ac,
-        )

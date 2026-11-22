@@ -31,7 +31,7 @@ import urllib.request
 import urllib.error
 
 LOG_FILE = "/home/gerry/CAP/AvTrack/jumpstart/log/messages.log"
-INGEST_URL = "http://192.168.0.57:8000/api/swim/ingest"
+INGEST_URL = "http://127.0.0.1:8000/api/swim/ingest"  # backend moved to r815 2026-11-01, now same-host
 CAP_PATTERN = re.compile(r'"CAP\d+"')
 MESSAGE_START = '<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection'
 MESSAGE_END = "</ns5:MessageCollection>"

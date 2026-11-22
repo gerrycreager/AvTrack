@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Complete AvTrack Setup</title>
+<style>
+  :root { --bg: #14181c; --panel: #1c2126; --text: #e8eaed; --muted: #9aa4ad; --accent: #2b6cb0; --accent2: #6fa8dc; --border: #3a4048; --err: #ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  main { width: 380px; max-width: 92vw; padding: 24px; }
+  a { color: var(--accent2); }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); font-size: 13px; margin-top: 0; }
+  form, .panel { background: var(--panel); padding: 20px 22px; border-radius: 8px; display: flex; flex-direction: column; gap: 12px; }
+  label { font-size: 12px; }
+  input { width: 100%; box-sizing: border-box; padding: 7px; margin-top: 4px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+  button { padding: 9px; border-radius: 4px; border: none; background: var(--accent); color: white; cursor: pointer; font-size: 13px; }
+  button:hover { background: #3579c4; }
+  #msg { font-size: 13px; min-height: 16px; }
+  #msg.error { color: var(--err); }
+  .back { font-size: 12px; margin-top: 14px; display: block; text-align: center; }
+  img.qr { background: white; padding: 8px; border-radius: 6px; display: block; margin: 0 auto; }
+  code.secret { word-break: break-all; display: block; background: var(--bg); padding: 8px; border-radius: 4px; font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main id="root">
+  <p>Loading&hellip;</p>
+</main>
+<script>
+  const params = new URLSearchParams(location.search);
+  const token = params.get("token") ?? "";
+  const root = document.getElementById("root");
+
+  async function init() {
+    if (!token) {
+      root.innerHTML = "<p>Missing setup token. Use the link from your approval email.</p>";
+      return;
+    }
+    const res = await fetch(`/api/registration/setup/${encodeURIComponent(token)}`);
+    if (!res.ok) {
+      root.innerHTML = "<p>This setup link is invalid or has expired. Contact whoever approved your request.</p>";
+      return;
+    }
+    const data = await res.json();
+    root.innerHTML = `
+      <h1>Finish setting up your account</h1>
+      <p class="sub">${data.display_name} &middot; CAP ID ${data.cap_id}</p>
+      <form id="setup-form">
+        <label>New password<br/><input type="password" id="password" minlength="8" required /></label>
+        <label>Confirm password<br/><input type="password" id="password2" minlength="8" required /></label>
+        <button type="submit">Set Password &amp; Continue</button>
+        <div id="msg"></div>
+      </form>
+    `;
+    document.getElementById("setup-form").addEventListener("submit", onSubmit);
+  }
+
+  async function onSubmit(e) {
+    e.preventDefault();
+    const msg = document.getElementById("msg");
+    msg.textContent = "";
+    msg.className = "";
+    const password = document.getElementById("password").value;
+    const password2 = document.getElementById("password2").value;
+    if (password !== password2) {
+      msg.textContent = "Passwords don't match.";
+      msg.className = "error";
+      return;
+    }
+    const res = await fetch(`/api/registration/setup/${encodeURIComponent(token)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      msg.textContent = err.detail ?? "Could not complete setup.";
+      msg.className = "error";
+      return;
+    }
+    const data = await res.json();
+    root.innerHTML = `
+      <h1>Scan this into your authenticator app</h1>
+      <p class="sub">Google Authenticator, Authy, 1Password, etc. This is shown once -- if you lose it, an admin will need to reset your account.</p>
+      <div class="panel">
+        <img class="qr" src="${data.qrcode_data_uri}" width="200" height="200" alt="TOTP QR code" />
+        <p class="sub" style="margin-bottom:2px;">Can't scan it? Enter this manually:</p>
+        <code class="secret">${data.otpauth_uri}</code>
+      </div>
+      <a class="back" href="/">Account ready &mdash; go log in &rarr;</a>
+    `;
+  }
+
+  init();
+</script>
+</body>
+</html>

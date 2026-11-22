@@ -14,6 +14,7 @@ usable cookie value.
 """
 
 import hashlib
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -87,6 +88,16 @@ async def get_current_user(request: Request, session: AsyncSession = Depends(get
     return user
 
 
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Gates app/api/registration.py's pending-request review routes
+    (REQUIREMENTS.md 3.7 follow-up, added 2026-11-02). Simpler than
+    require_mission_member's factory shape -- admin-ness isn't scoped to any
+    particular mission/path param, just a flat User.is_admin flag."""
+    if not user.is_admin:
+        raise HTTPException(403, "Admin access required")
+    return user
+
+
 def require_mission_member(mission_id_param: str = "mission_id"):
     """Dependency factory -- checks membership for whichever path/query param
     carries the mission id (default "mission_id", matching every mission-scoped
@@ -141,4 +152,87 @@ async def optional_mission_member(
     ).scalar_one_or_none()
     if membership is None:
         raise HTTPException(403, "Not a member of this mission")
+    return user
+
+
+# Roles allowed to LOG a time (REQUIREMENTS.md 3.3, added 2026-10-26, per Gerry:
+# "COMMS, AOBD or IC should be the only users who can log times" -- "Ops"
+# confirmed as a 4th equivalent role). Narrower than require_mission_member's
+# plain binary membership check, and a deliberate, explicit exception to this
+# app's usual "role is descriptive only, never gates anything" convention
+# (see MissionMembership's docstring in models.py) -- that convention still
+# holds everywhere else; this is the one place Gerry asked for role to be
+# authoritative. Case-insensitive WORD match (not a bare substring check --
+# found live 2026-10-26: a naive `"ic" in role.lower()` false-positives on
+# any role containing those two letters in sequence, e.g. "Safety Officer"
+# contains "ic" inside "Officer") against the free-text MissionMembership.role,
+# same loose spirit as the Comms/Status tab's default-tab hint in the frontend
+# -- but unlike that hint, this one actually blocks: a blank or unrecognized
+# role is fail-safe DENIED, confirmed by Gerry, even though that means an
+# existing member who never filled in a role loses logging ability until they
+# set one.
+_TIME_LOGGING_ROLE_PATTERN = re.compile(r"\b(comms?|aobd|ic|ops?)\b", re.IGNORECASE)
+
+
+def _role_permits_logging(role: str | None) -> bool:
+    if not role:
+        return False
+    return bool(_TIME_LOGGING_ROLE_PATTERN.search(role))
+
+
+async def require_time_logging_permission(
+    mission_id: uuid.UUID | None, request: Request, session: AsyncSession
+) -> User:
+    """Gate for actually LOGGING a time -- engine start/stop, wheels up/down, and
+    every comms quick-select waypoint type (in/out-grid, ops check, find, pirep,
+    rtb). Narrower than ordinary mission membership: COMMS/AOBD/IC/Ops only (see
+    TIME_LOGGING_ROLES above). When mission_id is None (legacy/unscoped data,
+    pre-Mission rollout), there's no MissionMembership row to read a role from
+    at all, so this falls back to requiring only login -- matching this app's
+    usual transitional-fallback philosophy (see optional_mission_member above)
+    rather than either silently allowing anonymous logging or retroactively
+    locking out every pre-Mission sortie."""
+    user = await get_current_user(request, session)
+    if mission_id is None:
+        return user
+    membership = (
+        await session.execute(
+            select(MissionMembership).where(
+                MissionMembership.mission_id == mission_id, MissionMembership.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(403, "Not a member of this mission")
+    if not _role_permits_logging(membership.role):
+        raise HTTPException(403, "Only COMMS, AOBD, IC, or Ops may log times")
+    return user
+
+
+async def require_time_edit_permission(
+    sortie_mission_id: uuid.UUID | None, sortie_pic_cap_id: str | None, request: Request, session: AsyncSession
+) -> User:
+    """Gate for CORRECTING an already-logged time (POST /api/events/{id}/edits).
+    Per Gerry: same roles as logging, PLUS the sortie's own pilot -- "a pilot
+    should be able to edit the times" -- identified by CAP ID match against
+    Sortie.pic_cap_id (not by display-name matching against the free-text
+    pic_name field, which isn't a reliable identity check). No pic_cap_id on
+    file for this sortie simply means the pilot exception doesn't apply --
+    fails closed to the same role check as logging, not open to everyone."""
+    user = await get_current_user(request, session)
+    if sortie_pic_cap_id and user.cap_id == sortie_pic_cap_id:
+        return user
+    if sortie_mission_id is None:
+        return user
+    membership = (
+        await session.execute(
+            select(MissionMembership).where(
+                MissionMembership.mission_id == sortie_mission_id, MissionMembership.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(403, "Not a member of this mission")
+    if not _role_permits_logging(membership.role):
+        raise HTTPException(403, "Only COMMS, AOBD, IC, Ops, or the sortie's own pilot may edit times")
     return user

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AvTrack Manual</title>
+<style>
+  :root { --bg: #14181c; --panel: #1c2126; --text: #e8eaed; --muted: #9aa4ad; --accent: #2b6cb0; --accent2: #6fa8dc; --warn: #d9a441; --border: #3a4048; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; line-height: 1.55; }
+  .layout { display: flex; max-width: 1100px; margin: 0 auto; }
+  nav { width: 220px; flex-shrink: 0; padding: 28px 12px; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; font-size: 13px; }
+  nav a { display: block; color: var(--muted); text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  nav a:hover { background: var(--panel); color: var(--text); }
+  main { flex: 1; min-width: 0; padding: 28px 24px 100px; }
+  a { color: var(--accent2); }
+  h1 { font-size: 26px; margin-bottom: 4px; }
+  h2 { font-size: 19px; margin-top: 42px; border-bottom: 1px solid var(--border); padding-bottom: 6px; scroll-margin-top: 10px; }
+  h3 { font-size: 15px; margin-top: 24px; color: var(--accent2); scroll-margin-top: 10px; }
+  .subtitle { color: var(--muted); margin-top: 0; }
+  .topnav { display: flex; gap: 16px; font-size: 13px; margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 10px 0; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  code { background: #0d1013; padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+  .note { border-left: 3px solid var(--warn); padding: 8px 12px; background: rgba(217,164,65,0.08); border-radius: 0 4px 4px 0; font-size: 14px; margin: 10px 0; }
+  .warn-strong { border-left: 3px solid #d9534f; background: rgba(217,83,79,0.08); }
+  .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 50px; }
+  @media (max-width: 760px) { .layout { flex-direction: column; } nav { position: static; width: 100%; max-height: none; } }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <a href="#login">Login &amp; accounts</a>
+  <a href="#missions">Missions</a>
+  <a href="#map">The map</a>
+  <a href="#aircraft">Aircraft Aloft / Mission Status</a>
+  <a href="#roster">Aircraft roster</a>
+  <a href="#sortie">Sortie panel &amp; comms log</a>
+  <a href="#opsboard">Ops Board</a>
+  <a href="#discovered">Discovered aircraft</a>
+  <a href="#gis">Airspace &amp; GIS layers</a>
+  <a href="#reports">Comms log PDF report</a>
+  <a href="#roles">Roles &amp; permissions</a>
+  <a href="#tz">Timezones</a>
+</nav>
+<main>
+  <div class="topnav"><a href="/">&larr; Back to the map</a> &middot; <a href="/quickstart.html">Quick-start</a></div>
+  <h1>AvTrack User Manual</h1>
+  <p class="subtitle">A reference for everything in the app. New here? Start with the <a href="/quickstart.html">quick-start</a> instead.</p>
+
+  <h2 id="login">Login &amp; accounts</h2>
+  <p>AvTrack uses standalone accounts — your CAP eServices login doesn't work here. There's no self-service sign-up; an administrator creates your account (CAP ID, password, and a TOTP authenticator secret) and gives you a QR code to scan into an authenticator app once. Every login needs all three: CAP ID, password, and the current 6-digit code from that app.</p>
+  <p>Your name and a <strong>Logout</strong> button appear top-right once logged in. Sessions last 12 hours.</p>
+
+  <h2 id="missions">Missions</h2>
+  <p>A mission is the scope almost everything else in AvTrack hangs off of: the aircraft roster, sorties, comms log, and the Ops Board are all per-mission. The Mission controls live in the left panel.</p>
+  <table>
+    <tr><th>Control</th><th>What it does</th></tr>
+    <tr><td>Mission dropdown</td><td>Shows missions you're a member of. Selecting one scopes the whole app to it. <strong>You must select it here even after creating or joining it</strong> — that's not automatic.</td></tr>
+    <tr><td>Show closed missions</td><td>Includes closed missions in the dropdown (shown with a <code>[closed]</code> tag).</td></tr>
+    <tr><td>+ New mission</td><td>Creates a mission (name, optional mission number in <code>YY-X-NNNN</code> format, optional role for yourself) and makes you its first member.</td></tr>
+    <tr><td>Join a mission&hellip;</td><td>Search by name or mission number to join one you're not yet a member of.</td></tr>
+  </table>
+  <p>Once a mission is selected, a members list and three lifecycle buttons appear below the dropdown:</p>
+  <table>
+    <tr><th>Button</th><th>What it does</th></tr>
+    <tr><td>Leave mission</td><td>Removes you from its member list. Doesn't affect the mission itself or anyone else in it.</td></tr>
+    <tr><td>Close mission</td><td>Marks it closed. Closed missions still appear in reports and history, and can be reopened. Aircraft are <em>not</em> affected — see the note below.</td></tr>
+    <tr><td>Reopen mission</td><td>Only shown once a mission is closed; undoes <strong>Close mission</strong>.</td></tr>
+    <tr><td>Add Member</td><td>Adds another user (by CAP ID) to this mission with a given role (IC/Ops/AOBD/COMMS, free text).</td></tr>
+  </table>
+  <div class="note"><strong>Closing a mission does not clear your aircraft roster.</strong> The aircraft roster (<a href="#roster">below</a>) is a standing, wing-wide list maintained independently of any one mission's open/closed state — it's driven by the monthly NHQ callsign/tail roster, not by which missions happen to be open. Don't expect closing a mission to empty the "Aircraft Aloft" list.</div>
+
+  <h2 id="map">The map</h2>
+  <p>Top-right: a basemap switcher (Terrain, Streets, Imagery, Hybrid) and an "Airfield labels" toggle. The search bar along the top lets you:</p>
+  <table>
+    <tr><th>Field</th><th>What it does</th></tr>
+    <tr><td>ICAO id / lat,lon / MGRS</td><td>Click <strong>Go</strong> to fly the map to that location and set your mission's operations-area center (used for distance/bearing displays) at the given radius in nm.</td></tr>
+    <tr><td>Callsign or tail, then Enter</td><td>Jumps straight to that aircraft's sortie panel, even if it has no live position yet (e.g. a WMIRS-planned sortie that hasn't launched).</td></tr>
+    <tr><td>Ops Board button</td><td>Opens the <a href="#opsboard">Ops Board</a> overlay.</td></tr>
+  </table>
+  <p>Left panel, <strong>Airspace</strong> section: toggles for Prohibited <span class="swatch" style="background:#cc0000;"></span>, Restricted <span class="swatch" style="background:#dc6400;"></span>, and MOA/Warning/Alert <span class="swatch" style="background:#5000c8;"></span> special-use airspace overlays.</p>
+  <p><strong>Airfield Display</strong> has three modes: <em>Default</em> (plain tiered icons/labels, denser detail as you zoom in), <em>Flight Impacts</em> (colored by METAR flight category where available), and <em>Station Plot</em> (full wind-barb/temperature station plots at closer zoom, barb-only further out).</p>
+
+  <h2 id="aircraft">Aircraft Aloft vs. Mission Status</h2>
+  <p>The right-hand panel has two tabs, and they show genuinely different things — this trips people up, so read this one carefully:</p>
+  <table>
+    <tr><th>Tab</th><th>Shows</th></tr>
+    <tr><td><strong>Aircraft Aloft</strong></td><td>Roster aircraft that are <em>currently airborne and actively reporting a position</em>. An aircraft that isn't in your roster, or that's on the ground, or that simply isn't transmitting right now, won't appear here — even if you can see it moving on the map.</td></tr>
+    <tr><td><strong>Mission Status</strong></td><td>A per-sortie operational view for your mission: sortie #, PIC, assigned area, ETA, overdue/no-contact flags — the same data as the <a href="#opsboard">Ops Board</a>, condensed for this narrow column. Sorted by CAP callsign number (zero-padded, so 535 sorts before 1012 correctly).</td></tr>
+  </table>
+  <div class="note warn-strong">Seeing an aircraft move on the map but not in Aircraft Aloft almost always means one thing: it isn't in your active roster yet. Real CAP-shaped traffic that was never added (or was only ever "discovered," never approved — see <a href="#discovered">Discovered aircraft</a> below) shows on the map for situational awareness, but will never appear in Aircraft Aloft until it's actually in the roster.</div>
+
+  <h2 id="roster">Aircraft roster</h2>
+  <p>Add aircraft to the tracked roster from the right panel's upload row: a CSV with columns <code>tail_number, callsign, callsign_prefix</code> (header names, case-insensitive). Uploading is always additive — it never removes a tail, and re-uploading just updates callsign/pilot info for tails already present.</p>
+  <p>Removing the ✕ next to an aircraft in Aircraft Aloft only removes it from the <em>current mission's</em> roster link — it stays in the global aircraft list, and the original monthly NHQ import is the only thing meant to retire a tail from the roster for real.</p>
+
+  <h2 id="sortie">Sortie panel &amp; comms log</h2>
+  <p>Click any aircraft (map marker or side-panel row) to open its sortie panel, bottom-left. It shows current sortie info, a track toggle (last 8 hours), a display-timezone selector, recent sorties (editable after the fact), and event history.</p>
+  <h3>Quick-select comms buttons</h3>
+  <p>Ten buttons mirror the real radio-call vocabulary. Click one to open a form with only the fields that type needs:</p>
+  <table>
+    <tr><th>Button</th><th>Fields</th><th>What it does</th></tr>
+    <tr><td>Engine Start</td><td>time, destination/area</td><td>Starts the sortie clock; also the first radio check confirming the aircraft's FM radio works.</td></tr>
+    <tr><td>Wheels Up</td><td>time</td><td>Logs takeoff.</td></tr>
+    <tr><td>In-Grid</td><td>location, altitude, fuel</td><td>Arrived in the assigned search/mission grid.</td></tr>
+    <tr><td>Out-Grid</td><td>location, altitude, fuel</td><td>Left the assigned grid.</td></tr>
+    <tr><td>Find</td><td>location</td><td>Something of interest located.</td></tr>
+    <tr><td>PIREP</td><td>location, altitude</td><td>Pilot report. Free-text is capped at 500 characters — the counter under the box turns red past that and asks you to condense rather than silently cutting you off.</td></tr>
+    <tr><td>Ops Check</td><td>location, altitude, fuel</td><td>Routine operations-normal check-in.</td></tr>
+    <tr><td>RTB</td><td>location, fuel, ETE</td><td>Returning to base, with estimated time enroute.</td></tr>
+    <tr><td>Wheels Down</td><td>time</td><td>Logs landing.</td></tr>
+    <tr><td>Engine Stop</td><td>time</td><td>Ends the sortie clock.</td></tr>
+  </table>
+  <p>Time fields default to "now" with a one-click refresh button. After submitting, the form stays open on the same type so you can log several of the same call in a row (e.g. a run of In-Grid calls). Already-logged times can be corrected afterward under "Event history" in the sortie panel.</p>
+
+  <h2 id="opsboard">Ops Board</h2>
+  <p>Click <strong>Ops Board</strong> in the top search bar for a wide, table-oriented view of every sortie in your mission from the last 24 hours: Sortie #, tail, type, mission #, PIC, assigned area, ATD/ETA/ATA, Last Ops Normal, and two alert states:</p>
+  <table>
+    <tr><td><span class="swatch" style="background:#ffab40;"></span><strong>No-contact warning</strong></td><td>Slow orange pulse — haven't heard from this aircraft in a while, independent of whether it's "due back" yet.</td></tr>
+    <tr><td><span class="swatch" style="background:#ff3b3b;"></span><strong>Missing</strong></td><td>Hard red flash — overdue past ETA <em>and</em> no contact, both past the same threshold (the CAPR 70-10 "missing aircraft" trigger).</td></tr>
+  </table>
+  <p>Click any row to jump to that aircraft's sortie panel.</p>
+
+  <h2 id="discovered">Discovered aircraft</h2>
+  <p>AvTrack passively watches for any CAP- or PARD-shaped callsign flying nearby, whether or not it's in your roster — shown on the map as an amber, dashed marker, distinct from your roster's blue markers. Ones inside your mission's operations area also surface at the top of the Ops Board with two buttons:</p>
+  <table>
+    <tr><td><strong>Approve</strong></td><td>Adds it to the real aircraft roster (the same effect as a roster CSV upload) — it'll then show up in Aircraft Aloft once airborne.</td></tr>
+    <tr><td><strong>Dismiss</strong></td><td>Clears the alert without adding it to the roster. It'll still show as a discovered marker on the map, just without re-alerting you in the Ops Board.</td></tr>
+  </table>
+
+  <h2 id="gis">Airspace &amp; GIS layers</h2>
+  <p>Beyond the built-in Prohibited/Restricted/MOA/Warning/Alert overlays, you can upload your own reference layers under <strong>Mission Layers</strong> in the left panel: KML, KMZ, a zipped Shapefile, or a zipped File Geodatabase — points, lines, or polygons (e.g. search-area boundaries or reporting points). Uploaded layers are scoped to your current mission and listed below the upload row with a remove (✕) button each.</p>
+
+  <h2 id="reports">Comms log PDF report</h2>
+  <p>Left panel, bottom: pick a start/end time (always UTC/Zulu, 24-hour, regardless of your display timezone setting elsewhere) and click <strong>Generate PDF</strong> for a printable record of everything logged in that window.</p>
+
+  <h2 id="roles">Roles &amp; permissions</h2>
+  <p>Anyone added to a mission can view its sorties, aircraft, and history. Logging or editing a time (any of the ten quick-select buttons, or correcting a past entry) requires your mission role to contain one of: <strong>COMMS, AOBD, IC,</strong> or <strong>Ops</strong> (case-insensitive, matched as a whole word — "Safety Officer" does not match just because it contains "ic"). A blank or unrecognized role is blocked from logging, fail-safe. One exception: a sortie's own pilot can always correct that sortie's own logged times, matched by CAP ID, regardless of role.</p>
+
+  <h2 id="tz">Timezones</h2>
+  <p>The sortie panel's display-timezone selector affects only how times are <em>shown</em> to you on screen (UTC, Eastern through Pacific, Alaska, Hawaii, Puerto Rico, or Arizona's no-DST variant) — everything is still stored and logged in UTC underneath, and the Comms Log PDF report always prints UTC/Zulu regardless of this setting.</p>
+
+  <footer>AvTrack &middot; <a href="/">Map</a> &middot; <a href="/quickstart.html">Quick-start</a></footer>
+</main>
+</div>
+</body>
+</html>

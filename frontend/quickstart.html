@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AvTrack Quick-Start</title>
+<style>
+  :root { --bg: #14181c; --panel: #1c2126; --text: #e8eaed; --muted: #9aa4ad; --accent: #2b6cb0; --accent2: #6fa8dc; --warn: #d9a441; --border: #3a4048; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; line-height: 1.55; }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 20px 80px; }
+  a { color: var(--accent2); }
+  h1 { font-size: 26px; margin-bottom: 4px; }
+  h2 { font-size: 18px; margin-top: 36px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .subtitle { color: var(--muted); margin-top: 0; }
+  .topnav { display: flex; gap: 16px; font-size: 13px; margin-bottom: 20px; }
+  .step { background: var(--panel); border-radius: 8px; padding: 14px 16px; margin: 14px 0; }
+  .step .num { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 50%; background: var(--accent); color: white; font-size: 12px; font-weight: 700; margin-right: 8px; }
+  code { background: #0d1013; padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+  .note { border-left: 3px solid var(--warn); padding: 8px 12px; background: rgba(217,164,65,0.08); border-radius: 0 4px 4px 0; font-size: 14px; margin: 10px 0; }
+  .warn-strong { border-left: 3px solid #d9534f; background: rgba(217,83,79,0.08); }
+  kbd { background: #0d1013; border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px; font-size: 0.9em; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 50px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="topnav"><a href="/">&larr; Back to the map</a> &middot; <a href="/manual.html">Full user manual</a></div>
+  <h1>AvTrack Quick-Start</h1>
+  <p class="subtitle">Get from "never opened this" to logging your first comms entry, in about five minutes.</p>
+
+  <h2>1. Get an account</h2>
+  <div class="step"><span class="num">1</span>There's no self-serve sign-up. Ask whoever's administering AvTrack for your mission to create you a CAP ID + password + authenticator (TOTP) account. You'll get a QR code to scan into an authenticator app (Google Authenticator, Authy, 1Password, etc.) at setup time.</div>
+  <div class="step"><span class="num">2</span>Open AvTrack in a browser and log in with your CAP ID, password, and the current 6-digit code from your authenticator app.</div>
+
+  <h2>2. Find or create your mission</h2>
+  <div class="step"><span class="num">1</span>In the left panel, under <strong>Mission</strong>, type into the "Join a mission&hellip;" box to search for one you're already a member of (by name or mission number), or use <strong>+ New mission</strong> if this is a brand-new one.</div>
+  <div class="step"><span class="num">2</span>Once created or joined, <strong>select it from the dropdown above "+ New mission."</strong></div>
+  <div class="note">This is easy to miss: creating or joining a mission doesn't automatically put you "in" it for the session — you have to also pick it from that dropdown. Once selected, a members list and Leave/Close/Reopen controls appear below it, and the rest of the app (aircraft roster, sorties, comms log) scopes itself to that mission.</div>
+
+  <h2>3. Find your aircraft on the map</h2>
+  <div class="step"><span class="num">1</span>Aircraft already flying with a CAP/PARD-shaped callsign show up on the map automatically — no setup needed. The right-hand panel's <strong>Aircraft Aloft</strong> tab only shows aircraft that are both in your roster <em>and</em> currently airborne; click <strong>Mission Status</strong> instead for a per-sortie operational view (assigned area, ETA, overdue flags) of your own mission's sorties.</div>
+  <div class="step"><span class="num">2</span>To track a tail that isn't flying yet, add it to the roster: in the right panel, upload a CSV (<code>tail_number,callsign,callsign_prefix</code>) with the <strong>Add</strong> button above the aircraft list, or just wait — if it starts flying with a CAP-shaped callsign, it'll show on the map as a "discovered" (amber, dashed) marker even before you've added it anywhere.</div>
+  <div class="step"><span class="num">3</span>Click any aircraft (on the map or in the side list) to open its sortie panel at the bottom-left.</div>
+
+  <h2>4. Log a comms entry</h2>
+  <div class="step"><span class="num">1</span>With the sortie panel open, use the row of quick-select buttons: <strong>Engine Start, Wheels Up, In-Grid, Out-Grid, Find, PIREP, Ops Check, RTB, Wheels Down, Engine Stop</strong> — the same vocabulary as a real radio call.</div>
+  <div class="step"><span class="num">2</span>Click one, fill in only the fields that type actually needs (time defaults to now — click "Now" to refresh it), and submit. The panel re-populates itself so you can log another entry of the same type right away (handy for several In-Grid calls in a row).</div>
+  <div class="note">Logging/editing times requires your mission role to be COMMS, AOBD, IC, or Ops (set when you're added to the mission). Anyone can still <em>view</em> the sortie panel and history. If you're the aircraft's own pilot, you can still correct a logged time on your own sortie even without one of those roles.</div>
+
+  <h2>5. Wrap up</h2>
+  <div class="step"><span class="num">1</span>When the exercise or mission ends, open the Mission dropdown, select it, and click <strong>Close mission</strong>. (<strong>Reopen mission</strong> is there if you close it too early.)</div>
+  <div class="step"><span class="num">2</span>Need a record of everything logged? Use <strong>Comms Log Report</strong> in the left panel — pick a UTC start/end and click <strong>Generate PDF</strong>.</div>
+
+  <p>That's the five-minute version. For everything else — airspace overlays, GIS layers, the Ops Board, discovered-aircraft approval, timezones, and more — see the <a href="/manual.html">full manual</a>.</p>
+
+  <footer>AvTrack &middot; <a href="/">Map</a> &middot; <a href="/manual.html">Manual</a></footer>
+</main>
+</body>
+</html>

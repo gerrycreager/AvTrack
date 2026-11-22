@@ -54,18 +54,81 @@ const AIRCRAFT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 1
 // Topo (labeled contours) per Gerry's request. CAP already has an ESRI/ArcGIS
 // footprint elsewhere (see /home/gerry/CAP/ESRI, /home/gerry/CAP/GIS/ESRI); swap for
 // an org ArcGIS Online basemap/token later if preferred over these public services.
+// Each entry is a base raster layer; `overlay` (optional) is a second,
+// transparent raster layer drawn on top of it, same two-layer shape used for
+// `streets` and `hybrid` below.
 const BASEMAPS = {
+  // Real FAA VFR sectional raster, self-hosted on r815 (2026-11-21) --
+  // same source/pipeline as CAP_WxCOP's EWMC/Flight Ops Impacts pages,
+  // served via the same MapCache WMTS endpoint on this host, so there's
+  // no separate tiling/storage for AvTrack to maintain. Fetch/
+  // reprojection credit: Charlie Jackson, Capt, PCR-WA-068, creator of
+  // capgrids.com -- see /var/www/cap_winds_app/data/sectionals/README.md.
+  sectional: {
+    // Fully-qualified, not a relative path: AvTrack is served on its own
+    // port (2468, see /etc/apache2/sites-available/avtrack.conf), which
+    // proxies everything else straight to the AvTrack backend -- a
+    // relative "/mapcache/..." path would resolve against that origin
+    // and 404, not against the main site's Apache/mod_mapcache.
+    tiles: ["https://wxcop.duckdns.org/mapcache/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=sectional_vfr&STYLE=&TILEMATRIXSET=GoogleMapsCompatible&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=image/png"],
+    attribution: "FAA — chart automation by capgrids.com",
+  },
   topo: {
     tiles: ["https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}"],
     attribution: "USGS The National Map",
   },
+  // Replaced World_Street_Map 2026-10-25 per Gerry: "Streets should not show
+  // any relief: Just streets, highways, interstates, even named dirt roads,
+  // but not relief" -- World_Street_Map bakes in shaded relief/land-cover
+  // texture as part of its cartography, which isn't a toggle. Esri's own
+  // Light Gray Canvas base (flat, no relief) + its dedicated roads-only
+  // World_Transportation reference layer gives exactly "just streets."
   streets: {
-    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"],
-    attribution: "Esri, HERE, Garmin, FAO, NOAA, USGS, © OpenStreetMap contributors",
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
+    attribution: "Esri",
+    overlays: [
+      {
+        tiles: [
+          "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        ],
+        attribution: "Esri",
+      },
+    ],
   },
   imagery: {
     tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
     attribution: "Esri, Maxar, Earthstar Geographics",
+  },
+  // Satellite background + roads + boundaries foreground (roads added
+  // 2026-10-25, boundaries added 2026-11-02, both per Gerry). First roads
+  // attempt used Reference/World_Boundaries_and_Places (boundaries + place
+  // labels only, no actual road lines) for the overlay -- against solid
+  // imagery that read as "nothing's really there" (Gerry: "it appears the
+  // hybrid layer has streets underneath (not visible) the satellite layer").
+  // Switched to World_Transportation, which actually draws road/highway
+  // lines. Boundaries (state/national) are a second, separate overlay drawn
+  // above that -- deliberately baked into the hybrid basemap itself, not a
+  // separate checkbox anywhere: per Gerry, "the boundaries should just
+  // appear" when hybrid is selected, not be a listed/selectable toggle.
+  // World_Boundaries_and_Places also bundles light place-name labels; not
+  // worth a separate layer just to strip those back out.
+  hybrid: {
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    attribution: "Esri, Maxar, Earthstar Geographics",
+    overlays: [
+      {
+        tiles: [
+          "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        ],
+        attribution: "Esri",
+      },
+      {
+        tiles: [
+          "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        ],
+        attribution: "Esri",
+      },
+    ],
   },
 };
 const DEFAULT_BASEMAP = "topo";
@@ -83,17 +146,39 @@ const map = new maplibregl.Map({
     // Regular" fontstack referenced below.
     glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
     sources: Object.fromEntries(
-      Object.entries(BASEMAPS).map(([key, cfg]) => [
-        `basemap-${key}`,
-        { type: "raster", tiles: cfg.tiles, tileSize: 256, attribution: cfg.attribution },
-      ])
+      Object.entries(BASEMAPS).flatMap(([key, cfg]) => {
+        const srcs = [[`basemap-${key}`, { type: "raster", tiles: cfg.tiles, tileSize: 256, attribution: cfg.attribution }]];
+        (cfg.overlays ?? []).forEach((ov, i) => {
+          srcs.push([`basemap-${key}-overlay-${i}`, { type: "raster", tiles: ov.tiles, tileSize: 256, attribution: ov.attribution }]);
+        });
+        return srcs;
+      })
     ),
-    layers: Object.keys(BASEMAPS).map((key) => ({
-      id: `basemap-${key}-layer`,
-      type: "raster",
-      source: `basemap-${key}`,
-      layout: { visibility: key === DEFAULT_BASEMAP ? "visible" : "none" },
-    })),
+    // Any feature layer added later via addLayer() stacks on top of all of
+    // these by default -- only needs to keep each basemap's own overlay(s)
+    // (if any) listed right after its base here so they draw above that one
+    // base layer specifically, in array order (e.g. hybrid's boundaries draw
+    // above its roads, which draw above its imagery).
+    layers: Object.entries(BASEMAPS).flatMap(([key, cfg]) => {
+      const visible = key === DEFAULT_BASEMAP;
+      const layers = [
+        {
+          id: `basemap-${key}-layer`,
+          type: "raster",
+          source: `basemap-${key}`,
+          layout: { visibility: visible ? "visible" : "none" },
+        },
+      ];
+      (cfg.overlays ?? []).forEach((_, i) => {
+        layers.push({
+          id: `basemap-${key}-overlay-${i}-layer`,
+          type: "raster",
+          source: `basemap-${key}-overlay-${i}`,
+          layout: { visibility: visible ? "visible" : "none" },
+        });
+      });
+      return layers;
+    }),
   },
   center: [-98.5, 39.8], // CONUS center
   zoom: 3.2,
@@ -164,6 +249,39 @@ function activeMissionNumber() {
   return mission?.mission_number || null;
 }
 
+// The calling user's own free-text role on the active mission (MissionOut.role,
+// "IC/Ops/AOBD/COMMS, optional" -- never authoritative, see MissionMembership's
+// docstring in models.py). Used only to pick a *default* tab in the sortie
+// panel (REQUIREMENTS.md 3.3, added 2026-10-26) -- never to gate anything,
+// since this is free text and often blank.
+function activeMissionRole() {
+  const mission = currentMissions.find((m) => m.id === currentMissionId);
+  return mission?.role || null;
+}
+
+// Haversine distance (nm) + initial bearing (deg, 0-360) -- used by the Status
+// tab's "distance/bearing from Bullseye" (added 2026-10-26). No existing
+// frontend helper for this; the backend has an equivalent for AO-radius
+// membership checks (app/integrations/adsb_discovery.py) but that's a
+// different computation (point-in-radius, not distance+bearing) and isn't
+// exposed to the frontend, so this is a small, separate implementation.
+const EARTH_RADIUS_NM = 3440.065;
+function haversineNm(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * EARTH_RADIUS_NM * Math.asin(Math.sqrt(a));
+}
+function initialBearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
+}
+
 // True once the map's initial style load has completed. Deliberately NOT
 // map.isStyleLoaded() -- found live 2026-09-13 (Gerry: "I looked and didn't see the
 // MGRS box either"): that method tracks whether all currently-visible *tiles* have
@@ -184,8 +302,12 @@ map.on("load", () => {
 
 document.getElementById("basemap-select").addEventListener("change", (e) => {
   const selected = e.target.value;
-  for (const key of Object.keys(BASEMAPS)) {
-    map.setLayoutProperty(`basemap-${key}-layer`, "visibility", key === selected ? "visible" : "none");
+  for (const [key, cfg] of Object.entries(BASEMAPS)) {
+    const visible = key === selected;
+    map.setLayoutProperty(`basemap-${key}-layer`, "visibility", visible ? "visible" : "none");
+    (cfg.overlays ?? []).forEach((_, i) => {
+      map.setLayoutProperty(`basemap-${key}-overlay-${i}-layer`, "visibility", visible ? "visible" : "none");
+    });
   }
 });
 
@@ -221,7 +343,16 @@ const wingHintByTail = new Map();
 // under the map's default startup zoom (3.2) so it *looked* right on first load,
 // but zooming out further than that dropped major hubs while military stayed --
 // not the paired floor Gerry wants. Tiers 1 and 2 now share the same zoom-0 floor.
-const TIER_MIN_ZOOM = { 1: 0, 2: 0, 3: 7, 4: 12, 5: 14 };
+// Rebalanced 2026-10-25 per Gerry: "we're not seeing more and smaller
+// airfields as we zoom in." The filter itself was working correctly -- the
+// thresholds just had two dead zones that made it LOOK broken across the
+// zoom range people actually use: nothing new appeared anywhere between z7
+// and z12 (a 5-level gap), and tier 5 (the "smaller" fields -- ~78% of all
+// airfields) didn't unlock until z14, well past typical regional/single-wing
+// usage (project memory: AvTrack is usually opened at that scale, not
+// CONUS-wide). Spaced to 2-3 zoom levels apart instead, so each step in
+// actually reveals something new.
+const TIER_MIN_ZOOM = { 1: 0, 2: 0, 3: 6, 4: 9, 5: 11 };
 
 // Airfield LABEL tier coloring (REQUIREMENTS.md 3.2, added 2026-10-15) -- per
 // Gerry: "just like EWMC, Airfield tier (mil vs civ) should be reflected on the
@@ -346,8 +477,9 @@ async function refreshAirfields() {
   const requestId = ++airfieldsRequestId;
   const b = map.getBounds();
   const bounds = `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+  const maxTier = maxAirfieldTierForZoom(map.getZoom());
   try {
-    const res = await fetch(`/api/airfields?bounds=${bounds}`);
+    const res = await fetch(`/api/airfields?bounds=${bounds}&max_tier=${maxTier}`);
     const rows = await res.json();
     if (requestId !== airfieldsRequestId) return; // superseded by a newer request
     latestAirfieldRows = rows; // reused by the Flight Impacts/Station Plot weather modes below
@@ -476,6 +608,24 @@ const FLIGHT_CATEGORY_COLORS = { VFR: "#00b300", MVFR: "#0099ff", IFR: "#cc0000"
 // tuned against real field use.
 const STATION_PLOT_MIN_ZOOM = { 1: 0, 2: 0, 3: 4, 4: 6, 5: 6 };
 const STATION_PLOT_FULL_ZOOM_OFFSET = 3; // full plot at minZoom+this; barb-only between minZoom and that
+
+// Server-side row-count reduction (added 2026-11-02, found live) -- the backend
+// has supported a max_tier filter since this endpoint was written
+// (app/api/airfields.py), but refreshAirfields() below never sent it, so every
+// call fetched and serialized all ~22k airfields regardless of zoom, then
+// filtered client-side after the fact. Uses whichever of TIER_MIN_ZOOM /
+// STATION_PLOT_MIN_ZOOM is MORE PERMISSIVE at each tier -- they're deliberately
+// decoupled (see both tables' comments above) and Station Plot's thresholds are
+// uniformly lower, so taking the min of the two per tier guarantees this never
+// excludes a row either display mode would still want to show; client-side
+// filtering below is unchanged and still the real gate for what's drawn.
+function maxAirfieldTierForZoom(zoom) {
+  let maxTier = 1;
+  for (let t = 1; t <= 5; t++) {
+    if (zoom >= Math.min(TIER_MIN_ZOOM[t], STATION_PLOT_MIN_ZOOM[t])) maxTier = t;
+  }
+  return maxTier;
+}
 
 let airfieldDisplayMode = "tier"; // "tier" | "impacts" | "station-plot"
 let latestAirfieldRows = []; // kept in sync by refreshAirfields; reused here instead of a second bbox fetch
@@ -943,6 +1093,10 @@ async function loadKnownAircraft() {
 // so renderDiscoveredSection below can phrase its count correctly ("in AO" vs
 // nationwide); the actual filtering is always done server-side.
 let aoIsSet = false;
+// The AO center, reused as the Bullseye reference point for the Status tab's
+// distance/bearing (added 2026-10-26) -- per Gerry, AvTrack has no distinct
+// Bullseye concept yet, only this AO center, so that's what's used for now.
+let bullseyeCenter = null; // {lat, lon} | null
 
 // Restores the persisted Area of Operations on page load (REQUIREMENTS.md 3.1,
 // added 2026-10-14) so a refresh doesn't visually lose the AO the backend still
@@ -953,6 +1107,7 @@ async function loadPersistedOpsArea() {
     if (!res.ok) return;
     const ao = await res.json();
     aoIsSet = !!ao;
+    bullseyeCenter = ao ? { lat: ao.center_latitude, lon: ao.center_longitude } : null;
     if (ao) setOpsArea([ao.center_longitude, ao.center_latitude], ao.radius_nm);
     else clearOpsArea(); // e.g. switched to a mission with no AO set yet
   } catch (err) {
@@ -960,8 +1115,15 @@ async function loadPersistedOpsArea() {
   }
 }
 
-function markerColor(tail) {
-  return knownAircraft.has(tail) ? "#2b6cb0" : "#d9534f"; // red = unlisted, per REQUIREMENTS.md 3.1
+// Ground/airborne distinction added 2026-10-25 per Gerry (spotted CAP418 sitting
+// on the ramp at Fullerton Municipal, hard to tell apart from an airborne tail at
+// a glance). Unlisted/unexpected stays red regardless of state -- that's a
+// separate "pay attention, unknown aircraft" warning (REQUIREMENTS.md 3.1) and
+// should still catch your eye even if the unknown aircraft is parked, not just
+// flying. Within known aircraft: gray on the ground, blue airborne.
+function markerColor(tail, pos) {
+  if (!knownAircraft.has(tail)) return "#d9534f";
+  return airborneState(pos) === "ground" ? "#8a8f98" : "#2b6cb0";
 }
 
 // Ghost-aircraft fix (found live 2026-09-12): aircraft parked at KBAK, engines off,
@@ -1031,7 +1193,7 @@ function upsertMarker(pos) {
     marker.setLngLat([pos.longitude, pos.latitude]);
   }
 
-  marker._dot.style.color = markerColor(pos.tail_number);
+  marker._dot.style.color = markerColor(pos.tail_number, pos);
   marker._dot.style.transform = `rotate(${pos.heading_deg ?? 0}deg)`;
   // Datablock: callsign on one line, altitude/speed on the next -- ATC-style, per
   // Gerry's requirement that every airborne aircraft always shows this, not just on
@@ -1039,9 +1201,19 @@ function upsertMarker(pos) {
   // caret (per Gerry, 2026-09-13) sits right after altitude, matching real ATC
   // datablock convention -- computed server-side from consecutive position deltas
   // (app/ingestion/poller.py), not read from any single provider field.
-  const alt = pos.altitude_ft != null ? Math.round(pos.altitude_ft) : "—";
-  const gs = pos.ground_speed_kt != null ? Math.round(pos.ground_speed_kt) : "—";
-  marker._datablock.innerHTML = `<div class="cs">${pos.callsign ?? pos.tail_number}</div><div>${alt}ft${verticalTrendArrow(pos.vertical_trend)} ${gs}kt</div>`;
+  //
+  // Callsign-only on the ground (added 2026-10-25 per Gerry): "the whole
+  // datablock" (alt/speed line) is reserved for airborne aircraft -- a parked
+  // tail's altitude/speed line is noise at best (see the CAP418 ground-speed
+  // artifact discussion the same day) and clutters the map alongside every
+  // other ramp-sitting aircraft.
+  if (airborneState(pos) === "ground") {
+    marker._datablock.innerHTML = `<div class="cs">${pos.callsign ?? pos.tail_number}</div>`;
+  } else {
+    const alt = pos.altitude_ft != null ? Math.round(pos.altitude_ft) : "—";
+    const gs = pos.ground_speed_kt != null ? Math.round(pos.ground_speed_kt) : "—";
+    marker._datablock.innerHTML = `<div class="cs">${pos.callsign ?? pos.tail_number}</div><div>${alt}ft${verticalTrendArrow(pos.vertical_trend)} ${gs}kt</div>`;
+  }
 
   renderPanel();
 }
@@ -1098,6 +1270,12 @@ const discoveredMarkers = new Map(); // DiscoveredCallsign.id -> maplibregl.Mark
 // of up to 45.
 const DISCOVERED_STALE_MINUTES = 5;
 const DISCOVERED_POLL_MS = 45000;
+// Reused by renderPanel() (Aircraft Aloft) -- added 2026-11-02 per Gerry: the
+// roster-only view rarely matched what was actually flying (36 tracked tails
+// vs. whatever subset of CAP-shaped traffic nationwide happens to be up at
+// any moment -- confirmed live, near-zero overlap). Rather than a second
+// fetch, Aircraft Aloft just reads the same `live` set this already computes.
+let latestDiscoveredLive = [];
 
 function approveDiscovered(id) {
   return fetch(withMissionParam(`/api/discovered/${id}/approve`), { method: "POST" })
@@ -1131,6 +1309,8 @@ async function refreshDiscoveredMarkers() {
       r.last_latitude != null &&
       r.last_longitude != null
   );
+  latestDiscoveredLive = live;
+  renderPanel(); // Aircraft Aloft reuses this set too -- see its declaration above
   const liveIds = new Set(live.map((r) => r.id));
   for (const [id, marker] of discoveredMarkers) {
     if (!liveIds.has(id)) {
@@ -1209,46 +1389,77 @@ async function refreshDiscoveredMarkers() {
 
 setInterval(refreshDiscoveredMarkers, DISCOVERED_POLL_MS);
 
-// Sidebar shows every LOADED tail (knownAircraft, from the roster), not just
-// ones currently transmitting -- added 2026-09-15 per Gerry: "we need to see
-// what aircraft are loaded, and if they're airborne. Once a set of tails is
-// loaded, it should be displayed." Previously the sidebar only ever showed
-// latestByTail (live positions), so a loaded-but-not-yet-reporting tail (e.g.
-// parked with the transponder off) was invisible until it started
-// broadcasting -- no way to confirm a roster upload actually took, short of
-// checking the API directly. Unlisted/unexpected aircraft (reporting live but
-// not in the roster) still show too, same red/⚠ treatment as before.
-const STATE_RANK = { airborne: 0, ground: 1, "not-reporting": 2 };
-const STATE_LABEL = { airborne: "AIRBORNE", ground: "ON GROUND", "not-reporting": "NOT REPORTING" };
-
+// Reverted 2026-10-18 per Gerry: "the 'aircraft aloft' column should ONLY show
+// aircraft that are reporting and airborne" -- on-ground/not-reporting roster
+// tails belong on the Ops Board (3.3, which already has its own ground/
+// not-reporting states per-sortie), not here. This undoes the 2026-09-15
+// change that made this panel show every loaded tail regardless of state;
+// that history is kept here only as context for why "aloft" once meant more
+// than its name. Unlisted live traffic (not in the roster) still shows --
+// that's unaffected by this change, since it was always filtered to
+// latestByTail (i.e. already reporting) in the first place.
+//
+// Extended 2026-11-02 per Gerry: roster-only was rarely useful -- the 36
+// tracked tails are scattered nationwide and almost never overlap with
+// whatever CAP-shaped traffic actually happens to be flying at any given
+// moment (confirmed live, repeatedly: zero overlap). Now also includes
+// currently-airborne *discovered* (not-yet-roster) candidates, same source
+// already polled for the map's amber/dashed markers (refreshDiscoveredMarkers,
+// latestDiscoveredLive). Considered scoping this to the current map viewport
+// ("if they're within the viewframe they need to be on the list") but Gerry
+// settled on simpler: "if they're airborne anywhere" they belong on the
+// list -- no viewport filtering, nationwide, same as the map markers already are.
 function renderPanel() {
   const list = document.getElementById("aircraft-list");
-  const tails = new Set([...knownAircraft, ...latestByTail.keys()]);
-  if (tails.size === 0) {
+
+  const trackedRows = [...latestByTail.entries()]
+    .filter(([, pos]) => airborneState(pos) === "airborne")
+    .map(([tail, pos]) => ({ tail, pos, unlisted: !knownAircraft.has(tail), discovered: false }));
+  const trackedTails = new Set(trackedRows.map((r) => r.tail));
+
+  const discoveredRows = latestDiscoveredLive
+    .filter((r) => r.last_altitude_ft != null && r.last_altitude_ft > 0 && !trackedTails.has(r.tail_number))
+    .map((r) => ({
+      tail: r.tail_number,
+      discoveredId: r.id,
+      callsign: r.callsign,
+      altitude_ft: r.last_altitude_ft,
+      ground_speed_kt: r.last_ground_speed_kt,
+      discovered: true,
+    }));
+
+  const rows = [...trackedRows, ...discoveredRows];
+  if (rows.length === 0) {
     // Distinguish "still connecting" from "connected, just no data yet" -- these look
     // identical to a viewer if both just say "Connecting..." forever, which is
     // actively misleading when e.g. ADS-B polling is paused server-side but the
     // WebSocket itself is fine. See REQUIREMENTS.md dev notes 2026-09-13.
     list.innerHTML = wsConnected
-      ? "<em>Connected — no aircraft loaded or reporting.</em>"
+      ? "<em>Connected — no aircraft airborne.</em>"
       : "<em>Connecting…</em>";
     return;
   }
 
-  const rows = [...tails].map((tail) => {
-    const pos = latestByTail.get(tail);
-    return { tail, pos, unlisted: !knownAircraft.has(tail), state: pos ? airborneState(pos) : "not-reporting" };
-  });
-  // Airborne first (most operationally relevant at a glance), then on-ground/
-  // live, then loaded-but-quiet -- alphabetical within each group.
-  rows.sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || a.tail.localeCompare(b.tail));
+  rows.sort((a, b) => (a.tail ?? "").localeCompare(b.tail ?? ""));
 
   list.innerHTML = rows
-    .map(({ tail, pos, unlisted, state }) => {
-      const callsign = pos?.callsign ?? callsignByTail.get(tail) ?? tail;
-      const meta = pos
-        ? `${Math.round(pos.altitude_ft ?? 0)} ft${verticalTrendArrow(pos.vertical_trend)} · ${Math.round(pos.ground_speed_kt ?? 0)} kt`
-        : tail; // not reporting -- show the tail number itself since callsign alone may not identify it
+    .map((row) => {
+      if (row.discovered) {
+        const callsign = row.callsign ?? row.tail;
+        const meta = `${Math.round(row.altitude_ft ?? 0)} ft · ${Math.round(row.ground_speed_kt ?? 0)} kt`;
+        return `
+          <div class="aircraft-row discovered" data-tail="${row.tail}">
+            <div class="callsign">
+              <span>${callsign}</span>
+              <span class="status-badge status-discovered">DISCOVERED</span>
+            </div>
+            <div class="meta">${meta}</div>
+            <button class="aloft-approve-btn" data-id="${row.discoveredId}" title="Add to the tracked aircraft roster">Approve</button>
+          </div>`;
+      }
+      const { tail, pos, unlisted } = row;
+      const callsign = pos.callsign ?? callsignByTail.get(tail) ?? tail;
+      const meta = `${Math.round(pos.altitude_ft ?? 0)} ft${verticalTrendArrow(pos.vertical_trend)} · ${Math.round(pos.ground_speed_kt ?? 0)} kt`;
       const wingHint = wingHintByTail.get(tail);
       const wingBadge = wingHint ? ` <span class="wing-hint" title="Display hint only, from callsign pattern -- not authoritative">(${wingHint})</span>` : "";
       // Remove-from-mission button (item 3, 2026-10-18 plan) -- only when a
@@ -1260,11 +1471,11 @@ function renderPanel() {
           ? `<button class="aircraft-remove-btn" data-tail="${tail}" title="Remove from this mission">✕</button>`
           : "";
       return `
-        <div class="aircraft-row state-${state} ${unlisted ? "unlisted" : ""}">
+        <div class="aircraft-row state-airborne ${unlisted ? "unlisted" : ""}" data-tail="${tail}">
           <div class="callsign">
             <span>${callsign}${wingBadge}${unlisted ? " ⚠" : ""}</span>
             <span class="aircraft-row-actions">
-              <span class="status-badge status-${state}">${STATE_LABEL[state]}</span>
+              <span class="status-badge status-airborne">AIRBORNE</span>
               ${removeBtn}
             </span>
           </div>
@@ -1272,6 +1483,22 @@ function renderPanel() {
         </div>`;
     })
     .join("");
+
+  // Row click opens the per-aircraft sortie/comms panel -- same pattern as the
+  // Ops Board's own rows (main.js renderOpsBoardTable) and the map marker
+  // (upsertMarker). Found live 2026-10-25: this panel's rows had no click
+  // handler at all, unlike those other two entry points. Discovered rows are
+  // deliberately excluded -- there's no Aircraft/Sortie record yet to open.
+  list.querySelectorAll(".aircraft-row:not(.discovered)").forEach((row) => {
+    row.addEventListener("click", () => openSortiePanel(row.dataset.tail));
+  });
+
+  list.querySelectorAll(".aloft-approve-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      approveDiscovered(btn.dataset.id);
+    });
+  });
 
   list.querySelectorAll(".aircraft-remove-btn").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
@@ -1312,8 +1539,71 @@ function connectWebSocket() {
 // No auto-detection exists yet (app/ingestion/heuristics.py is a stub), so today
 // every event here comes from these manual "log now" buttons -- same backend path
 // auto-detection will feed into later.
-const EVENT_TYPES = ["engine_start", "takeoff", "touch_and_go", "landing", "engine_stop"];
+//
+// Comms quick-select menu (added 2026-10-26, per Gerry's exact radio-call
+// vocabulary -- a static list, not a dropdown, deliberately answering the WMIRS
+// comms-log anti-pattern memory: "the menu of loggable comms events wasn't
+// designed around the actual aircraft-tracking workflow").
+//
+// Engine Start/Stop ARE in this list (corrected 2026-10-26 -- an earlier version
+// of this menu left them out, routing them only through the dedicated Start/Stop
+// Sortie forms below. Per Gerry: "That's a COMMS issue per sortie," i.e. the
+// same kind of radio call as everything else here, not a separate
+// administrative action. It also wasn't just a style preference: for a
+// WMIRS-imported planned sortie -- which already exists with a sortie #/mission #
+// but no engine_start logged yet -- GET .../sorties/current already returns it
+// (status "planned", engine_stop_event_id still null), so the panel shows this
+// in-progress view, not the Start Sortie form; the Start Sortie form only ever
+// appears when no Sortie row exists at all yet. Without Engine Start in this
+// menu, a WMIRS-planned sortie would have had NO way to log engine start at
+// all. Fixed properly, not just moved: app/api/events.py's create_event now
+// also links Sortie.engine_start_event_id (first wins)/engine_stop_event_id
+// (latest wins) for these two types, mirroring takeoff/landing exactly --
+// previously that route only ever linked takeoff/landing, so this would have
+// silently failed to link the sortie even with the button present.
+// "Touch & Go" removed (same date) -- per Gerry, not on his list and not a
+// reportable entity; it was carried over unasked from the old raw-event-log's
+// button set.
+//
+// `kind: "event"` -> POST /api/aircraft/{tail}/events (TrackingEvent only, no
+// SortieWaypoint -- matches takeoff/landing's existing shape).
+// `kind: "waypoint"` -> POST /api/sorties/{id}/waypoints (SortieWaypoint +
+// backing TrackingEvent, same as the pre-existing in_grid/out_grid/ops_check).
+// `fields` lists the STRUCTURED extras beyond the universal time + comments
+// every type gets, per Gerry's exact per-type list:
+// "Engine Start should have time of start, and destination or search area.
+// Wheels up will have just the time of takeoff. In-grid and Out-of-grid should
+// have location, altitude, fuel remaining... Find will have location, time,
+// and a description field... RTB call should have location, fuel remaining,
+// estimated time enroute." PIREP: location + altitude, confirmed by Gerry.
+const COMMS_TYPES = {
+  // engine_start/engine_stop use their own dedicated backend routes
+  // (POST .../sorties/{id}/start and /stop), not the generic events route --
+  // those routes already exist specifically for this (start was built for
+  // "the first call radio check-in" against a WMIRS-planned sortie, per its
+  // own docstring) and correctly link Sortie.engine_start_event_id/
+  // engine_stop_event_id, same as stop already did for Stop Sortie.
+  engine_start: { label: "Engine Start", kind: "sortie-start", fields: ["destination_area"] },
+  wheels_up: { label: "Wheels Up", kind: "event", eventType: "takeoff", fields: [] },
+  in_grid: { label: "In-Grid", kind: "waypoint", fields: ["location", "altitude", "fuel"] },
+  out_grid: { label: "Out-Grid", kind: "waypoint", fields: ["location", "altitude", "fuel"] },
+  find: { label: "Find", kind: "waypoint", fields: ["location"] },
+  pirep: { label: "PIREP", kind: "waypoint", fields: ["location", "altitude"] },
+  ops_check: { label: "Ops Check", kind: "waypoint", fields: ["location", "altitude", "fuel"] },
+  rtb: { label: "RTB", kind: "waypoint", fields: ["location", "fuel", "ete"] },
+  wheels_down: { label: "Wheels Down", kind: "event", eventType: "landing", fields: [] },
+  engine_stop: { label: "Engine Stop", kind: "sortie-stop", fields: [] },
+};
 let currentSortieTail = null;
+let currentCommsType = null; // which quick-select button is open, if any
+
+// Comms/Status tabs (added 2026-10-26) -- per Gerry: a comms operator wants
+// the quick-select menu, but AOBD/Ops/IC want a status view (time aloft,
+// position, fuel/time of last call, etc) reachable the *same* way (click the
+// aircraft). Both tabs are always one click away for anyone -- only the
+// DEFAULT tab is hinted by the user's own mission role (see
+// activeMissionRole()), never hard-gated, since that role is free text today.
+let currentSortieTab = "comms";
 
 // Display timezone (REQUIREMENTS.md 4): always starts at UTC on load, never persisted
 // across reloads -- deliberate, so a stale non-UTC selection from a previous
@@ -1421,25 +1711,22 @@ async function openSortiePanel(tailNumber) {
   document.getElementById("sortie-subtitle").textContent = tailNumber;
   panel.hidden = false;
 
-  // Shared time-entry field for the raw event log (added 2026-09-15 per Gerry:
-  // "I still don't see any way to enter wheels up (takeoff) or wheels down
-  // (landing) times" -- these buttons previously always logged server-now with
-  // no way to type the actual reported time, unlike engine start/stop (which
-  // already had time-entry fields elsewhere in the Start/Stop Sortie forms) and
-  // waypoints (which share one time field the same way this now does). Backend
-  // already supported an explicit event_time_utc (EventCreateIn) -- only the
-  // frontend never sent one for these event types.
-  document.getElementById("log-event-time-field").innerHTML = timeEntryFieldHtml("log-event", "Time");
-  wireTimeEntryField("log-event");
+  // Track selection doesn't carry over between aircraft -- switching tails
+  // while the panel's open always starts from "off" rather than silently
+  // showing the previous tail's trail under the new one's title.
+  document.getElementById("track-toggle").checked = false;
+  setTrackFeature(EMPTY_TRACK);
 
-  const buttons = document.getElementById("sortie-log-buttons");
-  buttons.innerHTML = "";
-  for (const type of EVENT_TYPES) {
-    const btn = document.createElement("button");
-    btn.textContent = type.replace(/_/g, " ");
-    btn.addEventListener("click", () => logEvent(tailNumber, type, readTimeEntryField("log-event")));
-    buttons.appendChild(btn);
-  }
+  // The comms quick-select menu itself is built inside renderInProgressSortie
+  // (it needs the sortie's mission #/sortie # to prepopulate the form header),
+  // not here -- reset which type was open so switching aircraft doesn't leave a
+  // stale type's form showing under the new tail.
+  currentCommsType = null;
+  // Default tab hinted by the user's own role on the active mission -- loose,
+  // case-insensitive substring match since role is free text; "status" is the
+  // fallback for anyone else (AOBD/Ops/IC, or simply no role set).
+  const role = (activeMissionRole() || "").toLowerCase();
+  currentSortieTab = role.includes("comm") ? "comms" : "status";
 
   await refreshSortieEvents(tailNumber);
   await refreshSortieInfo(tailNumber);
@@ -1452,7 +1739,14 @@ async function openSortiePanel(tailNumber) {
 // own mission_number server-side, so this is just a typing shortcut, not the
 // record of truth.
 const MISSION_NUMBER_KEY = "avtrack_session_mission_number";
-const WAYPOINT_TYPE_LABELS = { in_grid: "In-Grid", out_grid: "Out-Grid", ops_check: "Ops Check" };
+const WAYPOINT_TYPE_LABELS = {
+  in_grid: "In-Grid",
+  out_grid: "Out-Grid",
+  ops_check: "Ops Check",
+  find: "Find",
+  pirep: "PIREP",
+  rtb: "RTB",
+};
 
 // Mission number format -- advisory only, added 2026-09-14 per Gerry: fiscal year
 // (2 digits) - mission type (related to but not confirmed identical to the A/B/C
@@ -1525,6 +1819,7 @@ function renderStartSortieForm(tailNumber) {
     <div class="sortie-field"><label>Sortie #</label><input type="number" id="new-sortie-number" /></div>
     <div class="sortie-field"><label>Mission #</label><input type="text" id="new-mission-number" placeholder="YY-X-NNNN" value="${savedMissionNumber}" /></div>
     <div class="sortie-field"><label>PIC</label><input type="text" id="new-pic-name" value="${defaultPic}" /></div>
+    <div class="sortie-field"><label>PIC CAP ID</label><input type="text" id="new-pic-cap-id" placeholder="optional" /></div>
     <div class="sortie-field"><label>Assigned Area</label><input type="text" id="new-assigned-area" placeholder="Grid 12 / Route A" /></div>
     <div class="sortie-field"><label>ETE (hrs)</label><input type="number" step="0.1" min="0" id="new-ete-hours" placeholder="e.g. 3.2" /></div>
     ${timeEntryFieldHtml("new-engine-start", "Eng Start")}
@@ -1537,22 +1832,29 @@ function renderStartSortieForm(tailNumber) {
     const sortieNumber = document.getElementById("new-sortie-number").value;
     const missionNumber = document.getElementById("new-mission-number").value.trim();
     const picName = document.getElementById("new-pic-name").value.trim();
+    const picCapId = document.getElementById("new-pic-cap-id").value.trim();
     const assignedArea = document.getElementById("new-assigned-area").value.trim();
     const eteHours = document.getElementById("new-ete-hours").value;
     if (missionNumber) localStorage.setItem(MISSION_NUMBER_KEY, missionNumber);
-    await fetch(withMissionParam(`/api/aircraft/${tailNumber}/sorties`), {
+    const res = await fetch(withMissionParam(`/api/aircraft/${tailNumber}/sorties`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sortie_number: sortieNumber ? parseInt(sortieNumber, 10) : null,
         mission_number: missionNumber || null,
         pic_name: picName || null,
+        pic_cap_id: picCapId || null,
         assigned_area: assignedArea || null,
         ete_hours: eteHours ? parseFloat(eteHours) : null,
         engine_start_utc: readTimeEntryField("new-engine-start"),
         logged_by: loggedByName(),
       }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Could not start sortie: ${err.detail ?? res.statusText}`);
+      return;
+    }
     await refreshSortieInfo(tailNumber);
     await refreshSortieEvents(tailNumber);
   });
@@ -1591,8 +1893,8 @@ async function renderRecentSorties(tailNumber) {
           <span>Landing: ${sortie.landing_utc ? fmtInTz(sortie.landing_utc) : "—"}</span>
         </div>
         <div class="sortie-summary-row">
-          <span>Eng Start: ${fmtInTz(sortie.engine_start_utc)}</span>
-          <span>Eng Stop: ${fmtInTz(sortie.engine_stop_utc)}</span>
+          <span>Eng Start: ${sortie.engine_start_utc ? fmtInTz(sortie.engine_start_utc) : "—"}</span>
+          <span>Eng Stop: ${sortie.engine_stop_utc ? fmtInTz(sortie.engine_stop_utc) : "—"}</span>
         </div>
         <div class="recent-sortie-edit" hidden>
           <div class="sortie-field"><label>Sortie #</label><input type="number" class="edit-sortie-number" value="${sortie.sortie_number ?? ""}" /></div>
@@ -1632,12 +1934,22 @@ async function renderRecentSorties(tailNumber) {
 
 function renderInProgressSortie(tailNumber, sortie) {
   const container = document.getElementById("sortie-info");
+  // Generalized 2026-10-26 (was ops_check-only) -- altitude/fuel/ete/comments
+  // now populate for any comms quick-select type that asked for them (see
+  // COMMS_TYPES), not just Ops Check.
   const waypointRows = sortie.waypoints
     .map((wp) => {
-      const extra =
-        wp.waypoint_type === "ops_check"
-          ? ` · ${wp.altitude_ft ?? "—"}ft · fuel ${wp.fuel_remaining_hours ?? 0}h${wp.fuel_remaining_minutes ?? 0}m${wp.comments ? ` · ${wp.comments}` : ""}`
-          : "";
+      const parts = [];
+      if (wp.altitude_ft != null) parts.push(`${wp.altitude_ft}ft`);
+      if (wp.fuel_remaining_hours != null || wp.fuel_remaining_minutes != null) {
+        parts.push(`fuel ${wp.fuel_remaining_hours ?? 0}h${wp.fuel_remaining_minutes ?? 0}m`);
+      }
+      if (wp.ete_hours != null || wp.ete_minutes != null) {
+        parts.push(`ETE ${wp.ete_hours ?? 0}h${wp.ete_minutes ?? 0}m`);
+      }
+      if (wp.comments) parts.push(wp.comments);
+      if (wp.pirep_report) parts.push(wp.pirep_report);
+      const extra = parts.length ? ` · ${parts.join(" · ")}` : "";
       return `
         <div class="waypoint-row">
           <span class="wp-type">${WAYPOINT_TYPE_LABELS[wp.waypoint_type] ?? wp.waypoint_type}</span>
@@ -1648,7 +1960,7 @@ function renderInProgressSortie(tailNumber, sortie) {
 
   container.innerHTML = `
     <h3>Sortie In Progress</h3>
-    <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>Eng Start: ${fmtInTz(sortie.engine_start_utc)}</span></div>
+    <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>Eng Start: ${sortie.engine_start_utc ? fmtInTz(sortie.engine_start_utc) : "—"}</span></div>
     <div class="sortie-summary-row"><span>PIC: ${sortie.pic_name ?? "—"}</span><span>Mission: ${sortie.mission_number ?? "—"}</span></div>
     <div class="sortie-summary-row"><span>Area: ${sortie.assigned_area ?? "—"}</span><span>ETA: ${sortie.eta_utc ? fmtInTz(sortie.eta_utc) : "—"}</span></div>
     <div class="sortie-summary-row"><span>Takeoff: ${sortie.takeoff_utc ? fmtInTz(sortie.takeoff_utc) : "—"}</span><span>Landing: ${sortie.landing_utc ? fmtInTz(sortie.landing_utc) : "—"}</span></div>
@@ -1656,58 +1968,210 @@ function renderInProgressSortie(tailNumber, sortie) {
     <button class="sortie-action-btn stop" id="stop-sortie-btn">Stop Sortie</button>
 
     <div class="sortie-divider"></div>
-    <h3>Add Waypoint</h3>
-    <div class="sortie-field"><label>Type</label>
-      <select id="wp-type">
-        <option value="in_grid">In-Grid</option>
-        <option value="out_grid">Out-Grid</option>
-        <option value="ops_check">Ops Check</option>
-      </select>
+    <div class="panel-mode-toggle" id="sortie-tab-toggle">
+      <button class="panel-mode-btn" id="sortie-tab-comms-btn">Comms</button>
+      <button class="panel-mode-btn" id="sortie-tab-status-btn">Status</button>
     </div>
-    <div class="sortie-field"><label>Location</label>
-      <select id="wp-method">
-        <option value="latlon">Lat/Lon</option>
-        <option value="mgrs">MGRS</option>
-        <option value="named_point">Named point</option>
-      </select>
-    </div>
-    <div id="wp-location-inputs"></div>
-    ${timeEntryFieldHtml("wp", "Time")}
-    <div id="wp-ops-check-fields" hidden>
-      <div class="sortie-field"><label>Altitude</label><input type="number" id="wp-altitude" /></div>
-      <div class="sortie-field"><label>Fuel rem.</label>
-        <input type="number" id="wp-fuel-h" min="0" placeholder="hh" style="flex: 0 0 55px;" /> :
-        <input type="number" id="wp-fuel-m" min="0" max="59" placeholder="mm" style="flex: 0 0 55px;" />
-      </div>
-      <textarea id="wp-comments" rows="2" placeholder="Comments"></textarea>
-    </div>
-    <button class="sortie-action-btn" id="add-waypoint-btn">Add Waypoint</button>
 
-    <div class="sortie-divider"></div>
-    <div id="waypoint-list">${waypointRows || '<em style="color:#9aa4ad; font-size:11px;">No waypoints logged yet.</em>'}</div>
+    <div id="comms-tab-content">
+      <h3>Log Radio Call</h3>
+      <div class="log-buttons" id="comms-type-buttons"></div>
+      <div id="comms-form"></div>
+
+      <div class="sortie-divider"></div>
+      <div id="waypoint-list">${waypointRows || '<em style="color:#9aa4ad; font-size:11px;">No waypoints logged yet.</em>'}</div>
+    </div>
+    <div id="status-tab-content"></div>
   `;
   wireTimeEntryField("stop-engine");
-  wireTimeEntryField("wp");
 
   document.getElementById("stop-sortie-btn").addEventListener("click", async () => {
-    await fetch(`/api/sorties/${sortie.id}/stop`, {
+    const res = await fetch(`/api/sorties/${sortie.id}/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ engine_stop_utc: readTimeEntryField("stop-engine"), logged_by: loggedByName() }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Could not stop sortie: ${err.detail ?? res.statusText}`);
+      return;
+    }
     await refreshSortieInfo(tailNumber);
     await refreshSortieEvents(tailNumber);
   });
 
-  const methodSelect = document.getElementById("wp-method");
-  const typeSelect = document.getElementById("wp-type");
-  methodSelect.addEventListener("change", () => updateWaypointLocationInputs(methodSelect.value));
-  typeSelect.addEventListener("change", () => {
-    document.getElementById("wp-ops-check-fields").hidden = typeSelect.value !== "ops_check";
+  document.getElementById("sortie-tab-comms-btn").addEventListener("click", () => {
+    currentSortieTab = "comms";
+    renderSortieTab(tailNumber, sortie);
   });
-  updateWaypointLocationInputs(methodSelect.value);
+  document.getElementById("sortie-tab-status-btn").addEventListener("click", () => {
+    currentSortieTab = "status";
+    renderSortieTab(tailNumber, sortie);
+  });
 
-  document.getElementById("add-waypoint-btn").addEventListener("click", () => addWaypoint(tailNumber, sortie.id));
+  const commsButtons = document.getElementById("comms-type-buttons");
+  commsButtons.innerHTML = "";
+  for (const [key, cfg] of Object.entries(COMMS_TYPES)) {
+    const btn = document.createElement("button");
+    btn.textContent = cfg.label;
+    btn.dataset.type = key;
+    btn.addEventListener("click", () => {
+      currentCommsType = key;
+      renderCommsForm(tailNumber, sortie);
+    });
+    commsButtons.appendChild(btn);
+  }
+  renderCommsForm(tailNumber, sortie);
+  renderSortieTab(tailNumber, sortie);
+}
+
+// Switches between the Comms quick-select menu and the Status view -- both
+// always reachable, see currentSortieTab's own comment for why neither is
+// hard-gated by role.
+function renderSortieTab(tailNumber, sortie) {
+  document.getElementById("sortie-tab-comms-btn").classList.toggle("active", currentSortieTab === "comms");
+  document.getElementById("sortie-tab-status-btn").classList.toggle("active", currentSortieTab === "status");
+  document.getElementById("comms-tab-content").hidden = currentSortieTab !== "comms";
+  document.getElementById("status-tab-content").hidden = currentSortieTab !== "status";
+  if (currentSortieTab === "status") renderStatusTab(tailNumber, sortie);
+}
+
+// A starting point per Gerry ("I'll think of other things"): time aloft,
+// position in decimal degrees, distance/bearing from the Bullseye, fuel
+// remaining + time of last call, and current altitude -- everything computed
+// client-side from data already loaded for this panel, no new endpoint.
+function renderStatusTab(tailNumber, sortie) {
+  const container = document.getElementById("status-tab-content");
+  const pos = latestByTail.get(tailNumber);
+
+  let timeAloft = "Not airborne";
+  if (sortie.takeoff_utc) {
+    const ms = Date.now() - new Date(sortie.takeoff_utc).getTime();
+    const totalMin = Math.max(0, Math.round(ms / 60000));
+    timeAloft = `${Math.floor(totalMin / 60)}h ${totalMin % 60}m`;
+  }
+
+  let positionLine = "No live position";
+  let bullseyeLine = "Bullseye not set for this mission";
+  if (pos) {
+    positionLine = `${pos.latitude.toFixed(4)}, ${pos.longitude.toFixed(4)}`;
+    if (bullseyeCenter) {
+      const nm = haversineNm(bullseyeCenter.lat, bullseyeCenter.lon, pos.latitude, pos.longitude);
+      const brg = initialBearingDeg(bullseyeCenter.lat, bullseyeCenter.lon, pos.latitude, pos.longitude);
+      bullseyeLine = `${nm.toFixed(1)} nm, ${Math.round(brg)}° from Bullseye`;
+    }
+  }
+
+  // Most recent waypoint that actually carries a fuel reading -- not
+  // necessarily the most recent waypoint overall (e.g. a Find with no fuel
+  // field shouldn't shadow an earlier Ops Check's fuel reading).
+  const fuelWaypoints = sortie.waypoints.filter((wp) => wp.fuel_remaining_hours != null || wp.fuel_remaining_minutes != null);
+  const lastFuel = fuelWaypoints.length ? fuelWaypoints[fuelWaypoints.length - 1] : null;
+  const fuelLine = lastFuel
+    ? `${lastFuel.fuel_remaining_hours ?? 0}h ${lastFuel.fuel_remaining_minutes ?? 0}m, at ${fmtInTz(lastFuel.time_utc)}`
+    : "No fuel report logged yet";
+
+  const lastCallLine = sortie.waypoints.length ? fmtInTz(sortie.waypoints[sortie.waypoints.length - 1].time_utc) : "No calls logged yet";
+  const altitudeLine = pos?.altitude_ft != null ? `${Math.round(pos.altitude_ft)} ft` : "—";
+
+  container.innerHTML = `
+    <div class="sortie-field"><label>Time aloft</label><span>${timeAloft}</span></div>
+    <div class="sortie-field"><label>Position</label><span>${positionLine}</span></div>
+    <div class="sortie-field"><label>Bullseye</label><span>${bullseyeLine}</span></div>
+    <div class="sortie-field"><label>Altitude</label><span>${altitudeLine}</span></div>
+    <div class="sortie-field"><label>Fuel rem.</label><span>${fuelLine}</span></div>
+    <div class="sortie-field"><label>Last call</label><span>${lastCallLine}</span></div>
+  `;
+}
+
+// One shared, type-driven prepopulated form for the comms quick-select menu
+// (added 2026-10-26, replacing the old flat "Add Waypoint" form -- see
+// COMMS_TYPES above for the per-type field list and why Engine Start/Stop
+// aren't here). Prepopulates with Mission #/Callsign/Sortie #/current time per
+// Gerry's exact spec; only the fields that type actually needs beyond that are
+// shown, not every field for every type (directly answering the WMIRS
+// comms-log anti-pattern memory).
+function renderCommsForm(tailNumber, sortie) {
+  const container = document.getElementById("comms-form");
+  document.querySelectorAll("#comms-type-buttons button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.type === currentCommsType);
+  });
+  if (!currentCommsType) {
+    container.innerHTML = "";
+    return;
+  }
+  const cfg = COMMS_TYPES[currentCommsType];
+  const pos = latestByTail.get(tailNumber);
+  const callsign = pos?.callsign ?? callsignByTail.get(tailNumber) ?? tailNumber;
+
+  const fieldsHtml = [
+    cfg.fields.includes("location")
+      ? `
+        <div class="sortie-field"><label>Location</label>
+          <select id="wp-method">
+            <option value="latlon">Lat/Lon</option>
+            <option value="mgrs">MGRS</option>
+            <option value="named_point">Named point</option>
+          </select>
+        </div>
+        <div id="wp-location-inputs"></div>`
+      : "",
+    cfg.fields.includes("altitude")
+      ? `<div class="sortie-field"><label>Altitude</label><input type="number" id="wp-altitude" /></div>`
+      : "",
+    cfg.fields.includes("fuel")
+      ? `<div class="sortie-field"><label>Fuel rem.</label>
+           <input type="number" id="wp-fuel-h" min="0" placeholder="hh" style="flex: 0 0 55px;" /> :
+           <input type="number" id="wp-fuel-m" min="0" max="59" placeholder="mm" style="flex: 0 0 55px;" />
+         </div>`
+      : "",
+    cfg.fields.includes("ete")
+      ? `<div class="sortie-field"><label>ETE</label>
+           <input type="number" id="wp-ete-h" min="0" placeholder="hh" style="flex: 0 0 55px;" /> :
+           <input type="number" id="wp-ete-m" min="0" max="59" placeholder="mm" style="flex: 0 0 55px;" />
+         </div>`
+      : "",
+    // Engine Start-specific: "destination or search area" (Gerry's exact
+    // wording) -- writes to Sortie.assigned_area via PATCH, not a new column;
+    // prefilled with whatever's already set (e.g. from a WMIRS import or the
+    // Start Sortie form) so re-logging Engine Start doesn't blank it out.
+    cfg.fields.includes("destination_area")
+      ? `<div class="sortie-field"><label>Dest./Area</label><input type="text" id="wp-destination-area" value="${sortie.assigned_area ?? ""}" /></div>`
+      : "",
+  ].join("");
+
+  container.innerHTML = `
+    <div class="comms-form-header">
+      <div class="sortie-summary-row"><span>Mission ${sortie.mission_number ?? "—"}</span><span>${callsign}</span></div>
+      <div class="sortie-summary-row"><span>Sortie #${sortie.sortie_number ?? "—"}</span><span>${cfg.label}</span></div>
+    </div>
+    ${timeEntryFieldHtml("wp", "Time")}
+    ${fieldsHtml}
+    <textarea id="wp-comments" rows="2" placeholder="${currentCommsType === "pirep" ? "PIREP report" : "Message / notes"}"></textarea>
+    ${currentCommsType === "pirep" ? '<div id="pirep-counter" class="pirep-counter">0 / 500</div>' : ""}
+    <button class="sortie-action-btn" id="comms-submit-btn">Log ${cfg.label}</button>
+  `;
+  wireTimeEntryField("wp");
+  if (cfg.fields.includes("location")) {
+    const methodSelect = document.getElementById("wp-method");
+    methodSelect.addEventListener("change", () => updateWaypointLocationInputs(methodSelect.value));
+    updateWaypointLocationInputs(methodSelect.value);
+  }
+  // PIREP: no hard maxlength -- truncating silently mid-sentence is worse than
+  // letting the caller see they're over and summarize themselves. The counter
+  // just prompts; submitCommsEntry below is what actually stops an over-length
+  // submit, with a message explaining why, not a bare backend rejection.
+  if (currentCommsType === "pirep") {
+    const pirepCounter = document.getElementById("pirep-counter");
+    const pirepTextarea = document.getElementById("wp-comments");
+    const updatePirepCounter = () => {
+      const len = pirepTextarea.value.length;
+      pirepCounter.textContent = len > 500 ? `${len} / 500 -- too long, please summarize` : `${len} / 500`;
+      pirepCounter.classList.toggle("over-limit", len > 500);
+    };
+    pirepTextarea.addEventListener("input", updatePirepCounter);
+  }
+  document.getElementById("comms-submit-btn").addEventListener("click", () => submitCommsEntry(tailNumber, sortie, currentCommsType));
 }
 
 function updateWaypointLocationInputs(method) {
@@ -1730,8 +2194,73 @@ function updateWaypointLocationInputs(method) {
   }
 }
 
-async function addWaypoint(tailNumber, sortieId) {
-  const waypointType = document.getElementById("wp-type").value;
+// Replaces the old flat addWaypoint() (added 2026-10-26) -- routes through
+// either POST /api/aircraft/{tail}/events (kind: "event") or
+// POST /api/sorties/{id}/waypoints (kind: "waypoint") depending on the
+// quick-select type clicked, per COMMS_TYPES. Deliberately does NOT reset
+// currentCommsType on success -- re-renders the same type's form, cleared,
+// ready for another same-type entry (e.g. logging several In-Grid calls in a
+// row), matching how this panel already resets its own fields on every
+// refreshSortieInfo() re-render.
+async function submitCommsEntry(tailNumber, sortie, typeKey) {
+  const cfg = COMMS_TYPES[typeKey];
+  const timeUtc = readTimeEntryField("wp");
+  const commentsEl = document.getElementById("wp-comments");
+  const messageText = commentsEl ? commentsEl.value.trim() || null : null;
+  // PIREP's free text is a separate, DB-bounded column (SortieWaypoint.pirep_report,
+  // VARCHAR(500), added 2026-10-26 per Gerry) -- not the shared, unbounded
+  // `comments` every other type uses. Same textarea, different destination field.
+  const comments = typeKey === "pirep" ? null : messageText;
+  const pirepReport = typeKey === "pirep" ? messageText : null;
+
+  // Prompt rather than reject: the DB column is a real VARCHAR(500) constraint,
+  // but the caller should hear "please summarize" from us, not a generic 422
+  // after they've already hit Submit. Per Gerry 2026-10-26.
+  if (typeKey === "pirep" && pirepReport && pirepReport.length > 500) {
+    alert(`This PIREP is ${pirepReport.length} characters -- the max is 500. Please summarize/condense it, then log it.`);
+    return;
+  }
+
+  if (cfg.kind === "sortie-start" || cfg.kind === "sortie-stop") {
+    if (cfg.fields.includes("destination_area")) {
+      const destinationArea = document.getElementById("wp-destination-area").value.trim();
+      if (destinationArea) {
+        const patchRes = await fetch(`/api/sorties/${sortie.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ assigned_area: destinationArea }),
+        });
+        if (!patchRes.ok) {
+          const err = await patchRes.json().catch(() => ({}));
+          alert(`Could not update destination/area: ${err.detail ?? patchRes.statusText}`);
+          return;
+        }
+      }
+    }
+    const path = cfg.kind === "sortie-start" ? "start" : "stop";
+    const bodyKey = cfg.kind === "sortie-start" ? "engine_start_utc" : "engine_stop_utc";
+    const res = await fetch(`/api/sorties/${sortie.id}/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [bodyKey]: timeUtc, logged_by: loggedByName() }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Could not log ${cfg.label}: ${err.detail ?? res.statusText}`);
+      return;
+    }
+    await refreshSortieInfo(tailNumber);
+    await refreshSortieEvents(tailNumber);
+    return;
+  }
+
+  if (cfg.kind === "event") {
+    await logEvent(tailNumber, cfg.eventType, timeUtc, comments); // already refreshes sortie info/events itself
+    return;
+  }
+
+  // kind === "waypoint" -- every current waypoint-kind COMMS_TYPES entry
+  // includes "location" (see the config above), so this is always populated.
   const locationMethod = document.getElementById("wp-method").value;
   const lat = document.getElementById("wp-lat")?.value;
   const lon = document.getElementById("wp-lon")?.value;
@@ -1745,33 +2274,41 @@ async function addWaypoint(tailNumber, sortieId) {
   }
 
   const body = {
-    waypoint_type: waypointType,
+    waypoint_type: typeKey,
     location_method: locationMethod,
     raw_input: rawInput,
     latitude: lat ? parseFloat(lat) : null,
     longitude: lon ? parseFloat(lon) : null,
-    time_utc: readTimeEntryField("wp"),
+    time_utc: timeUtc,
     logged_by: loggedByName(),
+    comments,
+    pirep_report: pirepReport,
   };
-  if (waypointType === "ops_check") {
+  if (cfg.fields.includes("altitude")) {
     const altitude = document.getElementById("wp-altitude").value;
+    body.altitude_ft = altitude ? parseFloat(altitude) : null;
+  }
+  if (cfg.fields.includes("fuel")) {
     const fuelH = document.getElementById("wp-fuel-h").value;
     const fuelM = document.getElementById("wp-fuel-m").value;
-    const comments = document.getElementById("wp-comments").value.trim();
-    body.altitude_ft = altitude ? parseFloat(altitude) : null;
     body.fuel_remaining_hours = fuelH ? parseInt(fuelH, 10) : null;
     body.fuel_remaining_minutes = fuelM ? parseInt(fuelM, 10) : null;
-    body.comments = comments || null;
+  }
+  if (cfg.fields.includes("ete")) {
+    const eteH = document.getElementById("wp-ete-h").value;
+    const eteM = document.getElementById("wp-ete-m").value;
+    body.ete_hours = eteH ? parseInt(eteH, 10) : null;
+    body.ete_minutes = eteM ? parseInt(eteM, 10) : null;
   }
 
-  const res = await fetch(`/api/sorties/${sortieId}/waypoints`, {
+  const res = await fetch(`/api/sorties/${sortie.id}/waypoints`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    alert(`Could not add waypoint: ${err.detail ?? res.statusText}`);
+    alert(`Could not log ${cfg.label}: ${err.detail ?? res.statusText}`);
     return;
   }
   await refreshSortieInfo(tailNumber);
@@ -1795,6 +2332,7 @@ async function refreshSortieEvents(tailNumber) {
       row.innerHTML = `
         <div class="event-type">${ev.event_type.replace(/_/g, " ")}</div>
         <div class="event-time">${fmtInTz(ev.effective_time_utc)}${edited ? '<span class="edited-tag">edited</span>' : ""}</div>
+        ${ev.comments ? `<div class="wp-meta">${ev.comments}</div>` : ""}
         <div class="edit-controls">
           <input type="datetime-local" step="1" />
           <button>Correct time (${displayTimezone})</button>
@@ -1803,11 +2341,16 @@ async function refreshSortieEvents(tailNumber) {
       input.value = utcToZonedInputValue(new Date(ev.effective_time_utc), displayTimezone);
       row.querySelector("button").addEventListener("click", async () => {
         const newUtc = zonedInputValueToUtc(input.value, displayTimezone).toISOString();
-        await fetch(`/api/events/${ev.id}/edits`, {
+        const res = await fetch(`/api/events/${ev.id}/edits`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ field_name: "event_time_utc", new_value: newUtc, edited_by: loggedByName() }),
         });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          alert(`Could not correct time: ${err.detail ?? res.statusText}`);
+          return;
+        }
         refreshSortieEvents(tailNumber);
       });
       container.appendChild(row);
@@ -1818,16 +2361,25 @@ async function refreshSortieEvents(tailNumber) {
   }
 }
 
-async function logEvent(tailNumber, eventType, eventTimeUtc = null) {
-  await fetch(`/api/aircraft/${tailNumber}/events`, {
+async function logEvent(tailNumber, eventType, eventTimeUtc = null, comments = null) {
+  const res = await fetch(`/api/aircraft/${tailNumber}/events`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       event_type: eventType,
       event_time_utc: eventTimeUtc, // null = server-now, same as before this field existed
       logged_by: loggedByName(),
+      comments,
     }),
   });
+  // Found live 2026-10-26 (adding require_time_logging_permission, app/auth.py):
+  // this never checked the response at all, so a now-possible 403 (wrong role)
+  // would fail completely silently -- the button would appear to do nothing.
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(`Could not log event: ${err.detail ?? res.statusText}`);
+    return;
+  }
   refreshSortieEvents(tailNumber);
   // takeoff/landing now show in the "Sortie In Progress" summary (REQUIREMENTS.md
   // 3.3, 2026-09-14) -- refresh that too, not just the raw event log below it, or
@@ -1839,6 +2391,74 @@ async function logEvent(tailNumber, eventType, eventTimeUtc = null) {
 document.getElementById("sortie-close").addEventListener("click", () => {
   document.getElementById("sortie-panel").hidden = true;
   currentSortieTail = null;
+  document.getElementById("track-toggle").checked = false;
+  setTrackFeature(EMPTY_TRACK);
+});
+
+// ── Aircraft track/trail (REQUIREMENTS.md 3.1, added 2026-10-24) -- selectable
+// per aircraft via the sortie panel's "Show track" checkbox (per Gerry: "The
+// track needs to be selectable by aircraft, with an 8 hour window" -- not
+// always-on for every airborne tail, which would clutter the map). The 8-hour
+// window itself is a flat server-side cutoff (app/api/sorties.py's
+// aircraft_track), not "since takeoff" -- there's no formal airborne-state
+// transition tracked server-side to anchor that to instead.
+const EMPTY_TRACK = { type: "FeatureCollection", features: [] };
+
+function setTrackFeature(feature) {
+  if (!mapStyleReady) {
+    map.once("load", () => setTrackFeature(feature));
+    return;
+  }
+  const source = map.getSource("aircraft-track");
+  if (source) {
+    source.setData(feature);
+  } else {
+    map.addSource("aircraft-track", { type: "geojson", data: feature });
+    map.addLayer({
+      id: "aircraft-track-line",
+      type: "line",
+      source: "aircraft-track",
+      // Changed AGAIN 2026-10-25: the burnt-orange (#c2410c) that replaced the
+      // original light gold was itself too close to USGS Topo's own highway
+      // color -- same problem, different shade of the same red/orange family
+      // every basemap here already uses for roads. Magenta has no road,
+      // water, or vegetation meaning on any of topo/streets/imagery/hybrid, so
+      // it can't blend into any of them the way anything in the red-orange-
+      // yellow range keeps doing.
+      paint: { "line-color": "#d6007f", "line-width": 2.5 },
+    });
+  }
+}
+
+async function refreshAircraftTrack(tailNumber) {
+  try {
+    const res = await fetch(withMissionParam(`/api/aircraft/${tailNumber}/track`));
+    const points = await res.json();
+    if (!Array.isArray(points) || points.length < 2) {
+      setTrackFeature(EMPTY_TRACK);
+      return;
+    }
+    setTrackFeature({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: points.map((p) => [p.longitude, p.latitude]) },
+          properties: {},
+        },
+      ],
+    });
+  } catch {
+    setTrackFeature(EMPTY_TRACK);
+  }
+}
+
+document.getElementById("track-toggle").addEventListener("change", (e) => {
+  if (e.target.checked && currentSortieTail) {
+    refreshAircraftTrack(currentSortieTail);
+  } else {
+    setTrackFeature(EMPTY_TRACK);
+  }
 });
 
 // ── Air Ops Status Board (REQUIREMENTS.md 3.3, added 2026-10-01) -- a live,
@@ -1908,25 +2528,31 @@ function renderDiscoveredSection(rows) {
   el.querySelectorAll(".discovered-dismiss").forEach((btn) => btn.addEventListener("click", () => dismissDiscovered(btn.dataset.id)));
 }
 
+// Two independent alert conditions (REQUIREMENTS.md 3.3, added 2026-10-14), most
+// severe first: `missing` (CAPR 70-10's compound overdue+no-contact trigger,
+// flashing red) outranks `no_contact_warning` (soft, orange halo, independent of
+// ETA) outranks plain `overdue` (still shown as data, no longer itself an alarm --
+// per Gerry, "that's a different issue") outranks the ordinary state ranking.
+// Shared by the Ops Board table and the right-column Mission Status view (added
+// 2026-10-26) so the two views always agree on triage order.
+const OPS_BOARD_STATE_RANK = { airborne: 0, ground: 1, "not-reporting": 2, complete: 3 };
+function sortOpsBoardRows(rows) {
+  return [...rows].sort((a, b) => {
+    if (a.missing !== b.missing) return a.missing ? -1 : 1;
+    if (a.no_contact_warning !== b.no_contact_warning) return a.no_contact_warning ? -1 : 1;
+    if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
+    if (a.overdue && b.overdue) return b.overdue_minutes - a.overdue_minutes;
+    return OPS_BOARD_STATE_RANK[a.state] - OPS_BOARD_STATE_RANK[b.state];
+  });
+}
+
 function renderOpsBoardTable(rows) {
   const container = document.getElementById("ops-board-table");
   if (rows.length === 0) {
     container.innerHTML = "<em>No sorties in the last 24 hours.</em>";
     return;
   }
-  // Two independent alert conditions (REQUIREMENTS.md 3.3, added 2026-10-14), most
-  // severe first: `missing` (CAPR 70-10's compound overdue+no-contact trigger,
-  // flashing red) outranks `no_contact_warning` (soft, orange halo, independent of
-  // ETA) outranks plain `overdue` (still shown as data, no longer itself an alarm --
-  // per Gerry, "that's a different issue") outranks the ordinary state ranking.
-  const stateRank = { airborne: 0, ground: 1, "not-reporting": 2, complete: 3 };
-  const sorted = [...rows].sort((a, b) => {
-    if (a.missing !== b.missing) return a.missing ? -1 : 1;
-    if (a.no_contact_warning !== b.no_contact_warning) return a.no_contact_warning ? -1 : 1;
-    if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
-    if (a.overdue && b.overdue) return b.overdue_minutes - a.overdue_minutes;
-    return stateRank[a.state] - stateRank[b.state];
-  });
+  const sorted = sortOpsBoardRows(rows);
 
   const headers = [
     "Sortie #",
@@ -1993,6 +2619,113 @@ document.getElementById("ops-board-close").addEventListener("click", () => {
   opsBoardInterval = null;
 });
 
+// ── Right-column Aircraft Aloft / Mission Status toggle (added 2026-10-26).
+// Mission Status reuses the Ops Board's own data (GET /api/ops-board) -- per
+// Gerry's request for the same operational picture without having to open the
+// bottom overlay -- rendered as narrow stacked cards instead of a wide table,
+// since this column is 190px vs. the Ops Board's full-width overlay. Its sort
+// is its own (sortByCapCallsign below), not the Ops Board table's severity-
+// first sortOpsBoardRows -- per Gerry, Aircraft Aloft doesn't need sorting at
+// all, but Mission Status should be ordered by CAP callsign so COMMS can find
+// an aircraft fast when it calls in (rather than COMMS already having
+// selected it to make the call).
+const PANEL_MODE_STORAGE_KEY = "avtrack_panel_mode";
+let panelStatusInterval = null;
+
+// A plain string sort of "CAP535" vs "CAP1012" puts 1012 first ("1" < "5"
+// lexicographically) -- wrong for a list meant to be scanned in callsign
+// order. Zero-pad the numeric suffix to a fixed width before comparing (same
+// trick as sorting zero-padded version strings) so 3-digit callsigns compare
+// correctly against 4-digit ones; the displayed callsign itself is untouched.
+const CALLSIGN_SORT_RE = /^(CAP|PARD)\s?(\d+)$/i;
+function _callsignSortKey(callsign) {
+  const m = callsign ? CALLSIGN_SORT_RE.exec(callsign.trim()) : null;
+  if (!m) return `~${callsign ?? ""}`; // non-CAP/PARD-shaped callsigns/tails sort after all of them
+  return `${m[1].toUpperCase()}${m[2].padStart(4, "0")}`;
+}
+function sortByCapCallsign(rows) {
+  return [...rows].sort((a, b) =>
+    _callsignSortKey(a.callsign ?? a.tail_number).localeCompare(_callsignSortKey(b.callsign ?? b.tail_number))
+  );
+}
+
+function renderMissionStatusPanel(rows) {
+  const container = document.getElementById("mission-status-list");
+  if (rows.length === 0) {
+    container.innerHTML = "<em>No sorties in the last 24 hours.</em>";
+    return;
+  }
+  const sorted = sortByCapCallsign(rows);
+  container.innerHTML = sorted
+    .map((r) => {
+      const alertFlag = r.missing
+        ? `<span class="alert">MISSING</span>`
+        : r.no_contact_warning
+          ? `<span class="alert">NO CONTACT ${r.last_contact_minutes}m</span>`
+          : r.overdue
+            ? `<span class="alert">OVERDUE +${r.overdue_minutes}m</span>`
+            : "";
+      return `
+        <div class="mission-status-row" data-tail="${r.tail_number}">
+          <div class="top-line">
+            <span>${r.callsign ?? r.tail_number}${r.sortie_number != null ? ` · #${r.sortie_number}` : ""}</span>
+            <span class="status-badge status-${r.state}">${OPS_BOARD_STATE_LABEL[r.state]}</span>
+          </div>
+          <div class="meta">${r.assigned_area ?? "—"} · ETA ${r.eta_utc ? fmtInTz(r.eta_utc) : "—"}</div>
+          <div class="meta">Last Ops Normal ${r.last_ops_normal_utc ? fmtInTz(r.last_ops_normal_utc) : "—"} ${alertFlag}</div>
+        </div>`;
+    })
+    .join("");
+  container.querySelectorAll(".mission-status-row").forEach((row) => {
+    row.addEventListener("click", () => openSortiePanel(row.dataset.tail));
+  });
+}
+
+async function refreshMissionStatusPanel() {
+  try {
+    const res = await fetch(withMissionParam("/api/ops-board?hours=24"));
+    const { rows } = await res.json();
+    renderMissionStatusPanel(rows);
+  } catch (err) {
+    document.getElementById("mission-status-list").innerHTML = "<em>Failed to load mission status.</em>";
+    console.error(err);
+  }
+}
+
+function setPanelMode(mode) {
+  const aloftBtn = document.getElementById("panel-mode-aloft-btn");
+  const statusBtn = document.getElementById("panel-mode-status-btn");
+  const aloftList = document.getElementById("aircraft-list");
+  const statusList = document.getElementById("mission-status-list");
+  aloftBtn.classList.toggle("active", mode === "aloft");
+  statusBtn.classList.toggle("active", mode === "status");
+  aloftList.hidden = mode !== "aloft";
+  statusList.hidden = mode !== "status";
+
+  clearInterval(panelStatusInterval);
+  panelStatusInterval = null;
+  if (mode === "status") {
+    refreshMissionStatusPanel();
+    panelStatusInterval = setInterval(refreshMissionStatusPanel, OPS_BOARD_REFRESH_MS);
+  }
+  try {
+    localStorage.setItem(PANEL_MODE_STORAGE_KEY, mode);
+  } catch {
+    // ignore -- private browsing / storage disabled; mode just won't persist across reloads
+  }
+}
+
+document.getElementById("panel-mode-aloft-btn").addEventListener("click", () => setPanelMode("aloft"));
+document.getElementById("panel-mode-status-btn").addEventListener("click", () => setPanelMode("status"));
+
+let initialPanelMode = "aloft";
+try {
+  initialPanelMode = localStorage.getItem(PANEL_MODE_STORAGE_KEY) === "status" ? "status" : "aloft";
+} catch {
+  // ignore -- default to "aloft"
+}
+setPanelMode(initialPanelMode);
+
 // MGRS precision-box outline (REQUIREMENTS.md 3.2, added 2026-09-13) -- when a
 // locate query resolves to a box (truncated-precision MGRS, coarser than ~1m --
 // see app/api/locate.py's _precision_box docstring for why a bare grid square
@@ -2053,6 +2786,7 @@ async function locate(query) {
   const { latitude, longitude, bounds } = await res.json();
   const radiusNm = parseFloat(document.getElementById("locate-radius").value) || 0;
   if (radiusNm > 0) {
+    bullseyeCenter = { lat: latitude, lon: longitude };
     setOpsArea([longitude, latitude], radiusNm);
     // Persist to the backend (REQUIREMENTS.md 3.1, added 2026-10-14) so the
     // AO-scoped discovery poller can geofence against it -- additive, doesn't
@@ -2205,7 +2939,7 @@ const GIS_LAYER_COLOR = "#f4d03f";
 const gisLayers = new Map(); // id -> {name, feature_count}
 
 async function refreshGisLayerList() {
-  const res = await fetch("/api/gis/layers");
+  const res = await fetch(withMissionParam("/api/gis/layers"));
   const layers = await res.json();
   gisLayers.clear();
   for (const layer of layers) gisLayers.set(layer.id, layer);
@@ -2213,6 +2947,13 @@ async function refreshGisLayerList() {
   for (const layer of layers) {
     if (!map.getSource(`gis-${layer.id}`)) await addGisLayerToMap(layer.id);
   }
+}
+
+function showGisFeaturePopup(e) {
+  new maplibregl.Popup()
+    .setLngLat(e.lngLat)
+    .setHTML(`<pre style="margin:0;font-size:11px;">${JSON.stringify(e.features[0].properties, null, 1)}</pre>`)
+    .addTo(map);
 }
 
 async function addGisLayerToMap(layerId) {
@@ -2232,19 +2973,40 @@ async function addGisLayerToMap(layerId) {
     source: `gis-${layerId}`,
     paint: { "line-color": GIS_LAYER_COLOR, "line-width": 2 },
   });
-  map.on("click", `gis-${layerId}-fill`, (e) => {
-    new maplibregl.Popup()
-      .setLngLat(e.lngLat)
-      .setHTML(`<pre style="margin:0;font-size:11px;">${JSON.stringify(e.features[0].properties, null, 1)}</pre>`)
-      .addTo(map);
+  // Found live 2026-10-26: Point geometries (e.g. a KML with named reporting
+  // points, not just search-area polygons/lines) were stored and counted
+  // ("N features") but had no layer to actually draw them -- only fill/line
+  // existed, so every uploaded point silently never appeared on the map.
+  map.addLayer({
+    id: `gis-${layerId}-point`,
+    type: "circle",
+    source: `gis-${layerId}`,
+    filter: ["==", ["geometry-type"], "Point"],
+    paint: {
+      "circle-radius": 5,
+      "circle-color": GIS_LAYER_COLOR,
+      "circle-stroke-width": 1.5,
+      "circle-stroke-color": "#1a1a1a",
+    },
   });
+  for (const suffix of ["-fill", "-line", "-point"]) {
+    map.on("click", `gis-${layerId}${suffix}`, showGisFeaturePopup);
+  }
 }
 
 function removeGisLayerFromMap(layerId) {
-  for (const suffix of ["-fill", "-line"]) {
+  for (const suffix of ["-fill", "-line", "-point"]) {
     if (map.getLayer(`gis-${layerId}${suffix}`)) map.removeLayer(`gis-${layerId}${suffix}`);
   }
   if (map.getSource(`gis-${layerId}`)) map.removeSource(`gis-${layerId}`);
+}
+
+function clearGisLayers() {
+  // Mirrors clearKnownAircraft() -- switching missions must not leave a
+  // previous mission's uploaded layers cluttering the map or the list (found
+  // live 2026-10-26, same report as the mission-scoping fix above).
+  for (const id of gisLayers.keys()) removeGisLayerFromMap(id);
+  gisLayers.clear();
 }
 
 function renderGisLayerList() {
@@ -2259,7 +3021,7 @@ function renderGisLayerList() {
     row.className = "gis-layer-row";
     row.innerHTML = `<span class="gis-layer-name">${layer.name} (${layer.feature_count})</span><button title="Remove">✕</button>`;
     row.querySelector("button").addEventListener("click", async () => {
-      await fetch(`/api/gis/layers/${id}`, { method: "DELETE" });
+      await fetch(withMissionParam(`/api/gis/layers/${id}`), { method: "DELETE" });
       removeGisLayerFromMap(id);
       gisLayers.delete(id);
       renderGisLayerList();
@@ -2275,7 +3037,7 @@ document.getElementById("gis-upload-btn").addEventListener("click", async () => 
   const formData = new FormData();
   formData.append("file", file);
   formData.append("name", file.name.replace(/\.[^.]+$/, ""));
-  const res = await fetch("/api/gis/layers", { method: "POST", body: formData });
+  const res = await fetch(withMissionParam("/api/gis/layers"), { method: "POST", body: formData });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     alert(`Upload failed: ${err.detail || res.statusText}`);
@@ -2412,6 +3174,13 @@ document.getElementById("mission-show-closed-toggle").addEventListener("change",
 function updateMissionMembersVisibility() {
   const section = document.getElementById("mission-members-section");
   section.style.display = currentMissionId ? "block" : "none";
+  // Added 2026-11-02 per Gerry: the Leave/Close/Reopen controls being gated
+  // behind selecting a mission in the dropdown above (rather than, say,
+  // visible as soon as a mission exists) wasn't "articulated... in a way I
+  // understood" -- he closed a mission's worth of time not knowing this
+  // existed. Hint only needed while nothing's selected; once the section
+  // above is showing, the hint's job is done.
+  document.getElementById("mission-select-hint").hidden = !!currentMissionId;
   if (!currentMissionId) return;
   const mission = currentMissions.find((m) => m.id === currentMissionId);
   const isClosed = !!mission?.closed_at;
@@ -2443,10 +3212,12 @@ async function switchToMission(missionId) {
   setCurrentMissionId(missionId || null);
   document.getElementById("mission-select").value = currentMissionId || "";
   clearKnownAircraft();
+  clearGisLayers();
   updateMissionMembersVisibility();
   await loadKnownAircraft();
   await loadPersistedOpsArea();
   await refreshDiscoveredMarkers();
+  await refreshGisLayerList();
   if (!document.getElementById("ops-board-panel").hidden) refreshOpsBoard();
 }
 
@@ -2647,6 +3418,7 @@ async function checkAuthAndInit() {
   document.getElementById("login-overlay").hidden = true;
   document.getElementById("user-badge").hidden = false;
   document.getElementById("user-badge-name").textContent = currentUser.display_name;
+  document.getElementById("admin-requests-link").hidden = !currentUser.is_admin;
   populateMissionSelect();
   initTrackingData();
 }

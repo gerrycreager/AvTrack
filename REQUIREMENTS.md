@@ -65,6 +65,17 @@ is reusable as the Phase 2 server's schema — not thrown away.
   app/adsb/adsb_lol.py, rather than inventing a new one) — sorted airborne
   first, then on-ground, then quiet. Unlisted/unexpected live traffic (not in
   the roster) still gets the existing red/⚠ treatment, unchanged.
+  **Reverted 2026-10-18** — per Gerry: "the 'aircraft aloft' column should
+  ONLY show aircraft that are reporting and airborne," with on-ground/
+  not-reporting roster tails belonging on the Ops Board (3.3) instead, "until
+  they're flying." The panel (`renderPanel()` in main.js) now filters to
+  `latestByTail` entries with `altitude_ft > 0` only — a loaded-but-quiet
+  roster tail no longer appears here at all. Unlisted live traffic is
+  unaffected (it was always sourced from `latestByTail`, i.e. already
+  reporting). A roster tail with no open sortie and no live airborne position
+  now has nowhere it shows by design — the Ops Board is sortie-scoped, so a
+  tail that was never tasked (no Sortie row) won't appear there either; that
+  matches the real AOBD wall board, which only ever lists tasked aircraft.
 - **Unregistered CAP/PARD aircraft detection + one-click approve — shipped
   2026-10-14**: per Gerry, "If an unregistered aircraft comes into the Area of
   Operations, we need to know. We should be able to also register it with a
@@ -110,6 +121,29 @@ is reusable as the Phase 2 server's schema — not thrown away.
   the roster, reverted immediately via psql + clearing `dismissed_at` so it
   returned to pending for Gerry's own review, rather than left in the live
   roster as a side effect of testing.
+  **Staleness cutoff added 2026-10-18**: `list_discovered` had no recency filter
+  at all — a sighting nobody dismissed could linger indefinitely. Found live:
+  194 undismissed candidates nationwide, oldest 33 days stale, only 60 under
+  24h old — this, not a logic bug, was why the Ops Board alert section showed
+  "over 190 aircraft." Per Gerry, 12h is reasonable for "is this still a live
+  concern" — `CANDIDATE_STALE_CUTOFF` (app/integrations/adsb_discovery.py) now
+  applies to both `list_discovered` (dropped the no-AO example case from 194 to
+  2) and `refresh_known_candidates` (so adsb.lol calls aren't spent refreshing a
+  row that's already aged out of being shown anywhere). Explicitly **not**
+  paired with a fail-closed no-AO/no-mission fallback — per Gerry, "if we don't
+  have a mission and AO defined, we should SEE all airborne aircraft, just not
+  have them registered" — so the existing unscoped-when-no-AO behavior stays.
+  **adsb.lol 429 backoff added 2026-10-18**: found live, a sustained rate-limit
+  storm (every request failing for 20+ minutes, not the single-cycle blip a
+  prior session assumed) with zero backoff anywhere — each of the three
+  in-process callers (registered-aircraft poller, candidate refresher, AO
+  poller) just logged a 429 and retried at full cadence (30-60s) next cycle,
+  giving adsb.lol no quiet window to lift the limit. `app/adsb/rate_limit.py`
+  (new, shared by app/adsb/adsb_lol.py and app/integrations/adsb_discovery.py,
+  since both run in-process against the same remote limit) now skips the actual
+  network call while in cooldown, doubling the cooldown on each further 429 (30s
+  up to a 600s cap), resetting on success. Verified live: the block cleared on
+  its own ~6 minutes after the backoff started correctly skipping calls.
   **Datablock content changed 2026-10-15**: per Gerry, "the data labels
   doesn't need the tail number but does need airspeed and altitude" — the
   candidate marker's second line now shows `altitude_ft`/`ground_speed_kt`
@@ -255,6 +289,19 @@ is reusable as the Phase 2 server's schema — not thrown away.
     2000ft vertical is generous enough as-is without scaling by altitude regime.
   - **Visual treatment when flagged**: draw a 5nm-radius red circle around *both*
     the CAP aircraft and the offending traffic, to catch the eye on the map.
+
+- **Selectable flight track/trail, added 2026-10-24.** Per Gerry: "The track
+  needs to be selectable by aircraft, with an 8 hour window" — not an
+  always-on trail drawn for every airborne aircraft, which would clutter a
+  busy map. New `GET /api/aircraft/{tail_number}/track` route
+  (`app/api/sorties.py`) returns every `Position` row for that tail in the
+  last 8 hours (flat window, not "since takeoff" — there's no formal
+  airborne-state transition tracked server-side to anchor that to instead),
+  oldest first. Frontend: a "Show track" checkbox in the sortie panel
+  (opened by clicking an aircraft's marker) fetches it on check and draws it
+  as a single MapLibre `LineString` layer, cleared whenever the panel closes
+  or switches to a different tail — selection never carries over between
+  aircraft.
 
 ### 3.2 Map & Geospatial
 - Zoom-to-area by ICAO airport ID, lat/lon, USNG (US National Grid), or MGRS, **with
@@ -691,7 +738,9 @@ is reusable as the Phase 2 server's schema — not thrown away.
     `avtrack-cap-discovery.service` (systemd, `enabled`, `Restart=always` —
     same reasoning as `avtrack-backend.service`'s real outage lesson, and
     directly because Gerry flagged r815's daily 0700 UTC reboot as something
-    this needs to survive without a manual restart). Paced at 90s between
+    this needs to survive without a manual restart -- r815 no longer reboots
+    daily, per Gerry 2026-11-10, but `Restart=always`/`enabled` remains the
+    right call regardless of reboot cadence). Paced at 90s between
     queries (adsb.lol's undocumented rate limit is aggressive — the existing
     `/v2/reg/` bulk provider hit a hard 429 wall after just ~2 rapid calls —
     so this trades sweep speed for reliability; a full 22-point pass takes
@@ -769,6 +818,39 @@ is reusable as the Phase 2 server's schema — not thrown away.
       training, not evidence of landing (this is the same crowdsourced-
       coverage-gap point Gerry raised independently, and the same failure mode
       already documented above for FlightAware's `landed` flag).
+- **WMIRS sortie-planning import added 2026-10-19.** Per Gerry: sorties get created
+  in WMIRS; AvTrack should sync from the daily "AirSorties" planning export rather
+  than duplicating that planning work in two places. `POST /api/missions/{id}/
+  wmirs-import` (XLSX upload, `app/api/wmirs_import.py`) upserts by (mission_id,
+  wmirs_sortie_id) against new fields on `Sortie` (`wmirs_sortie_id`, `planned_date`,
+  `departure_raw`/`destination_raw` + resolved `*_airfield_id`, `wmirs_raw`). A
+  planned/imported sortie is just a `Sortie` row with `engine_start_event_id` still
+  null -- no new status enum, derived instead via `Sortie.effective_status()`
+  (planned/active/complete/cancelled, the last via a new `cancelled_at`, same
+  idempotent-timestamp convention as `Mission.closed_at`). Two new endpoints:
+  `POST /sorties/{id}/start` (promotes planned → active by logging engine_start on
+  the SAME row, instead of `create_sortie`'s always-new-row path) and
+  `POST /sorties/{id}/cancel`; aircraft reassignment is a `tail_number` field on the
+  existing `PATCH /sorties/{id}`. All three are gated to `planned` only (409
+  otherwise) -- once a sortie has flown, WMIRS data for it is stale by definition
+  and re-importing must never silently touch it (confirmed live: a second import
+  against an already-started/-cancelled sortie correctly skips with a warning
+  instead of overwriting). The Ops Board (`ops_board.py`) needed one real fix, not
+  just additive: a never-started planned sortie has no ATD and no position, which
+  fell through to the existing `not-reporting` state (reads as a lost-contact
+  alert) without an explicit `planned` branch checked first; cancelled sorties are
+  now excluded from the board query entirely (dead rows, no board-relevant state
+  left to show) while still showing in sortie history. Column semantics (real
+  `SortieStatus` values are "Complete"/"Approved/Released"/"Pending Release", not
+  guessed ones; SortieNo isn't chronological; bare airfield codes resolve via
+  `Airfield.faa_id` first, then a K/P/T-prefixed `icao_id` fallback that Gerry
+  confirmed is a general-but-not-universal rule) came from two real WMIRS exports,
+  not assumption -- full design history in this session's project memory.
+  **Side finding, not fixed here**: `get_ops_board()`'s latest-position lookup has
+  no staleness filter at all (unlike the websocket feed's 15-min
+  `SNAPSHOT_MAX_AGE`), so a tail with any historical position row showing
+  altitude>0 -- even weeks old -- displays as "airborne" regardless of recency.
+  Noticed during this feature's verification, not caused by it; still open.
 
 ### 3.3a AOBD/OSC Support Element (AvTrack + WxCOP integration, added 2026-10-01)
 
@@ -1446,8 +1528,261 @@ follow the NIMS taskbook."
     network), and whether adsb.lol's "dynamic" rate limit ever bites the bulk
     single-call approach at a larger fleet size than tested here (25 tails).
 
+- **adsb.lol sustained throttling + the hunt for more redundancy, 2026-10-19 through
+  2026-10-24.** adsb.lol has been returning 429 on essentially every request since
+  ~19:37 UTC on 10/19, continuously — confirmed not a volume problem (candidate-
+  refresh's call count was already scoped down 10/18; see `app/adsb/rate_limit.py`).
+  Raised the backoff ceiling from 600s to 3600s (10/20) so our own 10-minute probe
+  stops re-triggering the block before it can lift, then went looking for actual
+  redundancy rather than just waiting:
+  - **ADSB One: Cloudflare-blocked from our networks**, same as the already-known
+    airplanes.live finding above. Confirmed live from two independent networks
+    (this dev box and r815) — every request gets a bare `400` straight from
+    Cloudflare's edge, regardless of User-Agent. Not pursued further.
+  - **adsb.fi: initially wrongly reported as blocked too — it wasn't.** The first
+    attempt guessed `/v2/reg/...` (mirroring adsb.lol's path) against
+    `opendata.adsb.fi`, got the same bare empty `400`, and was wrongly written up
+    as a third Cloudflare block. Gerry caught this by pointing at adsb.fi's real
+    GitHub repo (`adsbfi/opendata`), which documents the actual path:
+    **`/api/v2/registration/[reg]`** (`registration`, not `reg`) — confirmed live,
+    same bulk comma-separated convention as adsb.lol, same `ac`-array response
+    shape (same readsb/ADSBExchange-v2 lineage). **Built and shipped as a third
+    concurrent provider** (`app/adsb/adsb_fi.py`), sharing the parsing logic with
+    `AdsbLolProvider` via a new shared `_parse_one_readsb_v2()` helper rather than
+    duplicating it. `app/adsb/rate_limit.py`'s module-level state was refactored
+    into a `RateLimiter` class so adsb.fi gets its own independent cooldown
+    instance instead of wrongly sharing adsb.lol's. adsb.fi's rate limit is
+    actually documented (1 req/sec public tier) and, unusually, **any 4xx response
+    (400/401/403/404/429) counts toward a temporary IP restriction** — a real
+    consequence of the earlier wrong-path testing, worth watching for. Live-
+    verified 2026-10-24: 6 real position fixes on the very first poll cycle,
+    more than OpenSky returned in its first cycle, with no daily credit cap to
+    budget against (unlike OpenSky) — just the 1 req/sec ceiling.
+  - **Licensing/ToS compliance pass, 2026-10-24**: Gerry flagged adsb.fi's terms
+    ("personal, non-commercial use only... must cite adsb.fi and include a link
+    to our home page") and asked to make sure we comply. Added a small, permanent
+    attribution line to the frontend (`#data-attribution`, bottom-left, distinct
+    from MapLibre's own basemap-tile attribution control) linking adsb.lol,
+    adsb.fi, and OpenSky Network — this was a real pre-existing gap for adsb.lol's
+    ODbL 1.0 license too, not just a new adsb.fi requirement, since no ADS-B data
+    source had any attribution anywhere before this. **Still open, not resolved
+    by this pass**: adsb.fi's license says "personal" use; AvTrack's use is CAP
+    organizational/operational (mission tracking), not an individual's personal
+    project — non-commercial clearly holds, "personal" is a real stretch. OpenSky's
+    terms are more clearly satisfied (non-profit/government purposes expressly
+    in scope, and CAP is both). **Resolved for now**: Gerry's own read is that
+    CAP's use is within bounds; he's emailed adsb.fi directly for explicit
+    confirmation (same pattern as the ADS-B Exchange CAP/SAR outreach above) and
+    is proceeding on that basis in the meantime, not blocking on a reply.
+  - **ADS-B Exchange's first reply pointed at their $10/mo Community API (RapidAPI)**,
+    not a free tier. They separately run a dedicated, free **CAP/SAR feeder program**
+    (`adsbexchange.com/cap-sar-feeder-program/`) — free hardware + install help for
+    SAR units, applied for via their contact page from an official unit email. Worth
+    following up on specifically by name; still open as of this writing.
+  - **OpenSky Network: built and shipped as a second concurrent provider**
+    (`app/adsb/opensky.py`), registered under Gerry's capnhq.gov account. Key
+    differences from every other provider here:
+    - **OAuth2 client_credentials, not a single API key** — OpenSky retired Basic
+      auth 2026-03-18. Token endpoint, 30-min token lifetime, and the whole flow
+      live-confirmed against the real account before any code was written.
+    - **Filters by icao24 (24-bit transponder hex), not registration** — there is no
+      `/reg/`-style lookup. `Aircraft.icao24` (new column, migration
+      `93e5f548d26a`) holds this; backfilled once from 25 already-tracked tails'
+      historical `Position.raw["hex"]` data, and kept current
+      going forward by an opportunistic backfill in `poller.py`'s `poll_once()` (any
+      provider whose raw payload includes `hex` — i.e. adsb.lol — fills it in the
+      first time a tail is seen). A tail never seen by such a provider has no known
+      icao24 yet and is silently skipped by OpenSky specifically until it is.
+    - **"Standard" tier (4,000 credits/day) confirmed to be the plain registered-
+      account tier**, not gated behind running a feeder (feeding only raises it
+      further, to 8,000/day) — directly relevant since Gerry initially suspected
+      otherwise.
+    - **Measured credit cost contradicts OpenSky's own docs**: their docs describe
+      an icao24-filtered `/states/all` call as 1 credit ("serial-only query"); three
+      live back-to-back calls each dropped `X-Rate-Limit-Remaining` by exactly 4.
+      Built against the measured number, not the documented one.
+      `OPENSKY_POLL_INTERVAL_SECONDS` defaults to 90s (960 calls/day × 4 credits =
+      3,840/day, leaving headroom under the 4,000 ceiling) rather than matching
+      adsb.lol's 30s cadence, which would have exhausted the day's budget in well
+      under 17 minutes.
+    - Live-verified 2026-10-24: real position data for two genuinely airborne CAP
+      tails (N452CP, N903CP) and one on the ramp (N718CP, correctly flagged
+      `on_ground`) ingested through this path with correct unit conversion (OpenSky
+      reports meters/m-per-second; converted to feet/knots).
+    - **Not yet done**: only 25 of 36 active tails have a known icao24 yet (the rest
+      haven't been seen by adsb.lol since this was built); OpenSky's rate-limit
+      handling honors its explicit `X-Rate-Limit-Retry-After-Seconds` header
+      directly rather than guessing, unlike adsb.lol's undocumented-limit backoff,
+      but hasn't yet been exercised against a real 429 from this account.
+
 ### 3.6 Reliability / Data Management
 - Routine, automated database backups (flight data is the thing that must not be lost).
+- **Backend Python interpreter, added 2026-10-25**: `backend/.venv` is built from a
+  dedicated conda env (`avtrack-py312`, Python 3.12), not `/usr/bin/python3` --
+  found live that an Ubuntu 24.04.1 upgrade bumped the system default to 3.14 and
+  removed `/usr/bin/python3.12` outright, breaking every shebang in the existing
+  venv (`avtrack-backend.service` sat in a 203/EXEC restart loop). Rebuilding
+  under the new system 3.14 directly doesn't work either: `shapely`, `mgrs`,
+  `asyncpg`, `python-qpid-proton` had no prebuilt wheels for it yet and failed to
+  compile from source -- normal lag for a CPython release that young. Per Gerry,
+  deliberately staying on 3.12 (a currently-supported, non-EOL release, and what
+  this app was actually built/tested against) rather than chasing whatever
+  Ubuntu's apt considers "current" is the right call, not just the fastest fix --
+  see README.md's "Why the venv is built from a conda Python" section for the
+  recreate-from-scratch steps. Also decouples the venv from apt entirely, so a
+  future Ubuntu upgrade can't repeat this specific break.
+- **Shipped (2026-11-01): backend + DB moved off the dev box ("cosp1") to r815 +
+  data2.** Gerry asked whether r815 (recently RAM-upgraded) had headroom to host
+  the backend, getting it off his workstation entirely. Confirmed live: r815 had
+  89GB RAM / 110GB disk available, 16 idle-ish cores, system Python already 3.12.3
+  (no conda detour needed there), Postgres 18 with the `postgis` package already
+  installed, and working outbound connectivity to adsb.lol/adsb.fi. The database
+  did **not** move to r815 too, despite that being the simpler zero-hop option --
+  r815's Postgres instance has 14 unrelated legacy databases, which looked at
+  first like "r815 is the shared DB host," but per Gerry those are un-purged
+  leftovers from *before* a deliberate earlier migration: DB operations were
+  moved off r815 (when it was low on memory) and split into data1 (LDM) / data2
+  (DB) specifically to avoid DB sprawl on r815, and all development since has
+  continued on data2. So the database went to **data2** instead, matching the
+  split WxCOP's own backend/DB already use -- the cross-host path (r815's
+  `pg_hba.conf`/ufw already trusting each other) was already proven working via
+  WxCOP before this.
+  - **What moved**: `avtrack-backend.service` and `avtrack-cap-discovery.service`
+    (both need the venv/code, so both went to r815, now bound to
+    `192.168.0.200:8000`); the `avtrack` Postgres database (`pg_dump`/`pg_restore`
+    into a fresh `avtrack` role+DB on data2's existing PG18 cluster, with
+    `CREATE EXTENSION postgis`). `deploy/r815-avtrack.conf`'s `ProxyPass` targets
+    were re-pointed from the dev box's `192.168.0.57:8000` to r815's own
+    `192.168.0.200:8000`.
+  - **What didn't move**: cosp1's `postgresql` service itself -- per Gerry, he
+    has other uses for that instance (it also runs a `cwop` database), so only
+    the two AvTrack-specific app services were stopped+disabled there. The
+    dormant `avtrack` database on cosp1 was left in place (not dropped) as a
+    rollback fallback. The FDPS/STDDS SWIM consumer+relay services (already on
+    r815, already disabled/inactive) weren't touched.
+  - **Verified live**: row counts on data2's new `avtrack` DB matched cosp1's
+    exactly pre-cutover (aircraft 584, sorties 7, positions 203669,
+    tracking_events 11, users 1); cross-host `psql` from r815 to data2 confirmed
+    working; a disposable test account did a real CAP-ID+password+TOTP login
+    against the new backend, confirmed the WebSocket (`/ws/positions`) connects
+    post-login, then was fully deleted and the deletion re-confirmed by direct
+    DB query. Both services run cleanly post-cutover with no errors in
+    `journalctl`.
+  - A brief planned outage (stopping cosp1's `avtrack-backend`/
+    `avtrack-cap-discovery` for the `pg_dump`/`pg_restore`) was explicitly
+    approved by Gerry in advance.
+- **Follow-up (2026-11-02): collation-version warning fixed, PostGIS updated,
+  and a real event-loop-blocking bug found and fixed.**
+  - **Collation warning**: cosp1's Postgres (`avtrack`, `cwop`, `postgres` DBs
+    all affected) warned of a collation-version mismatch after a prior Ubuntu
+    libc upgrade (2.39 -> 2.43). Fixed with `ALTER DATABASE ... REFRESH
+    COLLATION VERSION` on all three, followed by `REINDEX DATABASE` on each so
+    it's a real fix, not just suppressing the message. data2's `avtrack` DB
+    (restored fresh post-migration) never had this issue.
+  - **PostGIS upgraded 3.6.4 -> 3.7.0 on data2**, matching r815's version, for
+    both `avtrack` and WxCOP's `avwx_data` (same cluster) -- Gerry explicitly
+    chose to update both, not just AvTrack's. A `pg_dump` backup of `avwx_data`
+    (44.6M rows, 4GB) was taken first; the first attempt was accidentally killed
+    mid-dump by the `apt` package's own postinst script restarting
+    `postgresql@18-main` (a real mistake -- ran the apt upgrade in parallel with
+    the backup instead of sequentially) but nothing was lost, and the backup was
+    redone cleanly before `ALTER EXTENSION postgis/postgis_raster/
+    postgis_topology UPDATE` ran on `avwx_data`, and `ALTER EXTENSION postgis
+    UPDATE` on `avtrack`. Verified both databases' spatial queries and the
+    AvTrack backend end-to-end after.
+  - **Root-caused "wxcop.duckdns.org:2468 is slow"**: Gerry's own hypothesis was
+    the data2 DB hop; that's real but secondary (~2-3x on an endpoint, not the
+    dominant cost). The actual chain, found live:
+    1. `/api/airfields` and `/api/airspace/sua` are bbox-filtered but otherwise
+       unfiltered -- `frontend/src/main.js`'s `refreshAirfields()` never sent
+       the `max_tier` param the backend already supported, so every call fetched
+       and serialized all ~22k airfields (6MB) regardless of zoom; SUA has no
+       tier concept at all and returned up to 20.5MB of large-polygon GeoJSON.
+    2. Both routes built that response in a plain synchronous Python loop with
+       no `await` in it -- since `app/main.py` runs the ADS-B poll loops
+       (adsb.lol/adsb.fi/OpenSky) as `asyncio.create_task()`s on that same
+       single event loop, this didn't just make those two requests slow, it
+       stalled the ADS-B pollers and every other concurrent request for the
+       same 3-13 seconds (Gerry's own diagnosis, confirmed live).
+    3. A first fix attempt (`asyncio.to_thread`) was NOT sufficient -- confirmed
+       live that one of three concurrent requests to `/` still took 6s during a
+       big SUA call, because CPython's GIL still lets a CPU-bound thread stall
+       the event loop's own thread; shapely/GEOS calls don't release it
+       reliably.
+    4. Moved to a real `ProcessPoolExecutor` (`app.state.cpu_pool`, created once
+       at startup) instead -- true parallelism, no GIL contention. Only plain,
+       picklable data crosses the process boundary (raw WKB `bytes`, not
+       geoalchemy2's `WKBElement`; re-parsed with `shapely.wkb.loads()` directly
+       in the worker, confirmed to produce identical coordinates).
+    5. That still left ~2+ seconds of blocking -- traced to FastAPI's own
+       `json.dumps()` of the returned object, done synchronously back on the
+       event loop regardless of where the geometry work happened. Fixed by
+       doing `json.dumps()` inside the worker process too and returning a raw
+       `Response(content=<json string>, media_type="application/json")`
+       instead of a Python object -- a string crosses the process boundary
+       almost for free (confirmed live <0.1s), unlike the nested structure's
+       own JSON encoding.
+    6. Wired `max_tier` into `refreshAirfields()`, computed from the more
+       permissive of `TIER_MIN_ZOOM`/`STATION_PLOT_MIN_ZOOM` per tier (they're
+       deliberately decoupled, see both tables' own comments) so server-side
+       filtering never excludes a row either display mode still wants.
+  - **Verified live, before/after**: a concurrent small request to `/` during a
+    full-CONUS SUA call went from 6.15s (thread fix) to consistently
+    sub-100ms (process-pool + in-worker JSON fix); the big calls themselves also
+    got faster as a side effect (SUA ~9-13s -> ~4.8-7.3s; airfields ~3-8s ->
+    ~3.8-4.2s unfiltered, ~1.6-1.7s with `max_tier` sent). ADS-B polling cadence
+    confirmed unaffected (continuous `journalctl` activity, no gaps) during the
+    concurrency tests. A full Playwright page load afterward showed no console
+    errors.
+- **Follow-up (2026-11-02): refresh rate, hybrid basemap boundaries, Aircraft
+  Aloft scope, and quick-start/manual docs.**
+  - **adsb.fi poll interval 2s -> 1.5s** per Gerry (after discussing the
+    tradeoff: ~0.5 req/sec -> ~0.67 req/sec of adsb.fi's documented 1 req/sec
+    cap, still real margin against retries/jitter, not the exact edge).
+    `adsbfi_poll_interval_seconds` widened from `int` to `float` in config.py
+    and `run_poll_loop()`'s type hint to match.
+  - **Hybrid basemap now shows state/national boundaries**, baked directly
+    into the basemap (no new checkbox/list entry anywhere) per Gerry: "the
+    boundaries should just appear." `BASEMAPS`' single optional `overlay`
+    generalized to an `overlays` array so Hybrid can stack imagery -> roads ->
+    boundaries (Esri `World_Boundaries_and_Places`, which also bundles light
+    place labels -- no clean boundaries-only equivalent found). Streets'
+    existing one overlay still works unchanged under the new array shape.
+    Verified live via screenshot.
+  - **Aircraft Aloft scope changed**, after a real live investigation: Gerry
+    reported seeing 12 aircraft on the map (matching ADS-B Exchange) but zero
+    in Aircraft Aloft. Root cause confirmed live, not a migration regression --
+    the panel only ever showed the 36 roster tails marked `active=true`, and
+    those 36 are scattered nationwide (confirmed via `wing_lookup`), so they
+    almost never overlap with whatever CAP-shaped traffic actually happens to
+    be flying nationwide at a given moment (repeatedly confirmed: zero
+    position writes to the tracked pipeline, zero tail overlap against live
+    adsb.lol/adsb.fi queries, across two separate incidents). Discussed scope
+    directly with Gerry (reviewed: viewport-scoped "if they're within the
+    viewframe," settled on "if they're airborne anywhere" -- no viewport
+    filtering). `renderPanel()` (Aircraft Aloft) now merges `latestByTail`
+    (tracked roster) with `latestDiscoveredLive` (the same nationwide feed
+    already polled for the map's amber/dashed discovered markers), deduped by
+    tail. Discovered-only rows get a `DISCOVERED` badge and an inline
+    **Approve** button (reuses the existing `approveDiscovered()` call, same
+    effect as the Ops Board's own Approve) instead of being clickable to a
+    sortie panel, since there's no Aircraft/Sortie record yet for them.
+    **Follow-up fix same day**: the Approve button, first placed inline next
+    to the callsign and badge, ran off `#panel`'s 190px width (found live by
+    Gerry) -- moved to its own full-width line below the altitude/speed meta
+    line instead; confirmed live via screenshot and a pixel-level bounding-box
+    check (21px of clearance, not overflowing).
+  - **Quick-start guide and full user manual** added (`frontend/quickstart.html`,
+    `frontend/manual.html`), written fresh for an end user (not condensed from
+    this file's development history), reachable via a "? Help" link in the
+    top search bar. Static HTML, no build step, served by the existing
+    `StaticFiles` mount -- no backend route needed.
+  - **Mission dropdown-selection discoverability gap found and fixed**: Gerry
+    separately reported not being able to find the Leave/Close/Reopen mission
+    controls -- they were only ever shown after selecting a mission from the
+    dropdown, with nothing indicating that was necessary. Added a hint line
+    under the dropdown ("Select a mission above to manage it..."), hidden once
+    a mission is actually selected.
 
 ### 3.7 Per-User / Per-Mission Accounts (added 2026-10-16)
 
@@ -1650,6 +1985,305 @@ separate browser tabs.
   flows and resulting dropdown/button-visibility state. All disposable
   rows/accounts were deleted afterward; the real "Legacy" mission and
   Gerry's account/aircraft were untouched throughout.
+
+**Shipped (2026-10-26, right-column status toggle + comms/status sortie-panel
+redesign + GIS layer fixes):** full design/rollout plan
+`/home/gerry/.claude/plans/distributed-humming-sprout.md`.
+- **Layout scroll fix**: `#layers-panel` (left menu) had no `max-height`/
+  `overflow-y` of its own, so an overflowing panel made the whole document
+  scroll -- and since `#map` was `position: absolute` anchored to that same
+  unbounded body, it scrolled away too. Fixed with `overflow: hidden` on
+  `html, body` plus a bounded, independently-scrolling `#layers-panel`.
+- **Right column: Aircraft Aloft / Mission Status toggle**: `#panel` now
+  switches between the existing roster view and a condensed, narrow-column
+  rendering of the Ops Board's own data (`GET /api/ops-board`, same
+  overdue/no-contact/missing triage sort, `sortOpsBoardRows()` factored out
+  of `renderOpsBoardTable` so both views agree). Row click (in both modes,
+  and in the roster view, which previously had none at all) opens the
+  sortie panel, same as the map marker and the Ops Board's own rows.
+- **Comms + Status tabbed sortie panel**: replaces the old buried "Raw event
+  log" (5 flat buttons) and "Add Waypoint" (3 types) widgets with one
+  unified, static 9-button comms quick-select menu (Wheels Up, Touch & Go,
+  In-Grid, Out-Grid, Find, PIREP, Ops Check, RTB, Wheels Down -- per Gerry's
+  exact radio-call vocabulary, deliberately answering the WMIRS comms-log
+  anti-pattern memory) and a prepopulated form (Mission #/Callsign/Sortie
+  #/time always shown, only that type's own structured fields below,
+  `COMMS_TYPES` in `frontend/src/main.js`). Engine Start/Stop are
+  deliberately NOT in this menu -- they keep their existing dedicated
+  Start/Stop Sortie forms, since routing them through the generic
+  `POST /api/aircraft/{tail}/events` path (like the old raw-event-log did)
+  never actually linked `Sortie.engine_start_event_id`/`engine_stop_event_id`.
+  New `EventType` members `find`/`pirep`/`rtb` (Alembic
+  `d55c052f4502`); `SortieWaypoint.ete_hours`/`ete_minutes` (RTB-specific,
+  same migration); `altitude_ft`/`fuel_remaining_*`/`comments` widened past
+  ops_check-only; `EventCreateIn`/`EventOut` gained `comments` (stored in
+  `TrackingEvent.raw`) so even the time-only types (Wheels Up/Down, Touch &
+  Go) get the universal "place to enter the appropriate message." A second
+  Status tab (time aloft, position in decimal degrees, distance/bearing from
+  the mission's AO center -- reused as the Bullseye, no distinct Bullseye
+  entity exists -- altitude, fuel remaining + time at last call) is reachable
+  the same way; both tabs always available to anyone, default tab only
+  *hinted* by the caller's free-text `MissionMembership.role` (never hard-gated).
+  PIREP's field set (location + altitude) is an assumed default -- Gerry
+  didn't specify it explicitly; flagged for confirmation.
+- **GIS layer fixes** (`app/api/gis.py`, `frontend/src/main.js`): uploaded
+  Point geometries (e.g. named reporting points in a KML) were stored and
+  counted but never actually rendered -- only a polygon-fill and line layer
+  existed. Added a circle layer + click-popup for points, alongside fill/line.
+  Accepted formats narrowed to exactly KML/KMZ, Shapefile, and File
+  Geodatabase per Gerry (dropped bare GeoJSON/JSON); Geodatabase support
+  needed real work, not just an extension check -- GDAL's `/vsizip/` doesn't
+  auto-detect a `.gdb` directory inside a zip the way it does a Shapefile, so
+  `_find_gdb_dir()` peeks inside the zip first. Separately, despite being
+  labeled "Mission Layers" in the UI, uploads were never actually tied to a
+  mission (`GisLayer.mission_id` existed on the model but nothing set or
+  filtered on it) -- every mission saw every other mission's layers forever.
+  Fixed: upload/list/delete all mission-scoped now (`optional_mission_member`,
+  matching this app's usual transitional convention), switching missions
+  clears and reloads the map/list automatically, `clearGisLayers()` mirrors
+  `clearKnownAircraft()`.
+- **Verified live**: real KML (`NESA_Practice_Areas.kml`, 12 polygons + 12
+  points) through the actual upload endpoint; a real zipped File
+  Geodatabase built and uploaded end-to-end (parses, stores, retrieves
+  correct Point geometry, deletes cleanly); mission-scoping confirmed with
+  disposable missions (a layer uploaded under one mission is invisible to
+  another, and to the unscoped/legacy view); all 9 comms quick-select types
+  plus the Status tab driven directly in a real browser via
+  `window.openSortiePanel()` against disposable aircraft/sorties, confirming
+  correct per-type fields, correct event/waypoint persistence (including
+  `takeoff`/`landing` FK-linking and comments round-tripping), and the
+  Status tab's time-aloft/fuel/last-call values against known input. All
+  disposable aircraft/sorties/events/layers were deleted afterward; the real
+  roster, missions, and GIS layers were untouched throughout.
+- **Not done this round**: `app/api/events.py`'s three routes still have no
+  mission-membership gating at all (unlike almost every other mission-scoped
+  route in this app) -- flagged in the plan as an opportunistic fix, not yet
+  applied. (Closed in the 2026-10-26 round below, as part of the role-based
+  logging-permission work.)
+
+**Shipped (2026-10-26, same day, follow-up round -- comms menu corrections +
+role-based time-logging permission):** direct feedback on the round above.
+- **"Touch & Go" removed** from the comms quick-select menu -- carried over
+  unasked from the old raw-event-log's button set; per Gerry, not on his list
+  and not a reportable entity.
+- **Engine Start/Engine Stop added back** to the comms quick-select menu.
+  Earlier reasoning for excluding them was wrong: per Gerry, "That's a COMMS
+  issue per sortie," not a separate administrative action. Concretely, a
+  WMIRS-imported `planned` sortie already shows the in-progress panel (status
+  "planned", `engine_start_utc: null`) before engine start is ever logged --
+  the dedicated Start Sortie form never appears for it -- so without Engine
+  Start in this menu there was literally no way to log it for an imported
+  sortie. Routed through the existing, purpose-built
+  `POST /api/sorties/{id}/start` and `.../stop` routes (not the generic
+  events route) -- `/start`'s own docstring already described it as "what the
+  'first call' radio check-in resolves to," confirming this is the right
+  endpoint, not a new one. Engine Start also gained its "destination or
+  search area" field (PATCHes `Sortie.assigned_area`). Along the way, fixed a
+  latent display bug: a planned sortie's unset `engine_start_utc` was being
+  passed straight into `fmtInTz()` with no null guard.
+- **Cross-checked against the real "CAP Aircrew Communications Flimsy"** (a
+  physical form Gerry pointed to, `~/CAP/COMMS/Forms/NESA COMMS  2.pdf`). It
+  surfaced real differences from what was built (In-Grid/Out-Grid as
+  time-only on the form vs. location+altitude+fuel as built; RTB as fuel+ETA
+  vs. fuel+location+ETE-duration as built) -- confirmed by Gerry as
+  intentional: keep the richer AvTrack design in both cases (altitude/fuel on
+  In/Out-Grid specifically because under-fueled RTBs are a real, observed
+  failure mode; RTB keeps a duration estimate, not a form-matching absolute
+  ETA). No code changes resulted from this review.
+- **Role-based time-logging permission** (`app/auth.py`, new
+  `require_time_logging_permission`/`require_time_edit_permission`) -- a
+  deliberate, explicit, narrow exception to this app's usual "role is
+  descriptive only, never gates anything" rule (MissionMembership's
+  docstring), scoped to exactly this one action per Gerry: "COMMS, AOBD or IC
+  should be the only users who can log times" ("Ops" confirmed as a 4th
+  equivalent role). Logging a new time (engine start/stop, wheels up/down,
+  every comms quick-select waypoint type) now requires the caller's
+  mission role to word-match comms/aobd/ic/ops (case-insensitive, blank or
+  unrecognized role fail-safe DENIED, confirmed by Gerry); viewing event
+  history stays open to any mission member, unchanged. Editing an
+  already-logged time additionally allows the sortie's own pilot, identified
+  by CAP ID (`Sortie.pic_cap_id`, new column -- matched against the logged-in
+  user's own `User.cap_id`, not by comparing names, which aren't a reliable
+  identity check) -- "a pilot should be able to edit the times" per Gerry,
+  even though in practice they rarely do. A "PIC CAP ID" field (optional) was
+  added to the Start Sortie form to capture it.
+  - **Found and fixed during testing**: the first version of the role match
+    was a bare substring check (`"ic" in role.lower()`), which false-positived
+    on any role containing those two letters in sequence -- e.g. "Safety
+    Officer" (contains "ic" inside "Officer") would have incorrectly been
+    granted logging permission. Fixed with a word-boundary regex
+    (`\b(comms?|aobd|ic|ops?)\b`) before this ever reached a real account.
+  - **Verified live** with disposable users/mission/aircraft/sortie and real
+    login sessions (CAP ID + password + TOTP, matching the real login flow):
+    a COMMS-role user could log a waypoint and start/stop a sortie; a
+    blank-role user was blocked from both (403) but could still read the
+    event history (200); the sortie's own pilot (role "Pilot," not in the
+    allowed set, but CAP-ID-matched) could still correct a logged time; a
+    non-pilot, no-role user could not. All disposable users/sessions/mission/
+    aircraft were deleted afterward.
+- **Resolved (same day)**: Gerry chose a real DB constraint -- "PIREPs are
+  usually short and regardless can be condensed." Implemented as a separate
+  column, `SortieWaypoint.pirep_report` (`VARCHAR(500)`, new migration
+  `f4123617477f`), not by bounding the shared `comments` column -- that stays
+  unbounded `Text` for every other type (in_grid/out_grid/ops_check/find/rtb),
+  so this doesn't reintroduce the truncation-crash risk for them. Also bounded
+  at the Pydantic layer (`Field(max_length=500)`) so an over-long PIREP gets a
+  clean 422 instead of ever reaching the DB constraint, and the frontend
+  textarea gets a matching `maxlength="500"` so it's not even typeable past
+  that point. Verified live: a short PIREP, an exactly-500-char one, and a
+  501-char one (cleanly rejected, not a crash) against disposable data; also
+  confirmed no regression -- a 2000-char Ops Check comment still succeeds,
+  since `comments` itself was untouched.
+- **Follow-up correction (same day)**: Gerry: "we shouldn't REJECT a long
+  pirep, just prompt the user that it's too long and needs summarization."
+  Removed the hard `maxlength="500"` truncation (it silently stopped typing
+  mid-sentence with no explanation) in favor of a live character counter under
+  the PIREP textarea that turns red/bold past 500 with a "too long, please
+  summarize" message, plus a client-side check in `submitCommsEntry` that
+  blocks submission with a specific alert (character count, 500 max, "please
+  summarize/condense") before ever hitting the backend. The `VARCHAR(500)` DB
+  constraint and the Pydantic `max_length=500` 422 are both still in place as
+  the real backstop -- this only changes what the user experiences getting
+  there, from a bare rejection to an explained prompt.
+- **Mission Status column sort (2026-10-26)**: Gerry: Aircraft Aloft doesn't
+  need sorting, but Mission Status should be ordered by CAP callsign so COMMS
+  can find an aircraft fast when it calls in (rather than having already
+  selected it to make the call). A plain string sort of "CAP535" vs "CAP1012"
+  puts 1012 first ("1" < "5"), so `sortByCapCallsign` (`main.js`) zero-pads
+  the numeric suffix to a fixed width before comparing -- "assume there's a
+  leading zero for callsigns with three digits" -- giving correct ascending
+  numeric order (535, 834, 1012) without changing the displayed callsign
+  text. Deliberately separate from `sortOpsBoardRows` (severity-first triage
+  order), which still governs the Ops Board bottom-overlay table unchanged.
+- **Self-service account requests, added 2026-11-02** -- the "no self-service
+  signup... no outbound mail/SMS infrastructure" constraint above just changed:
+  confirmed live that r815 already runs a working Gmail SMTP relay (`msmtp`,
+  `/etc/msmtprc`, used today for CAP WxCOP alerts; `gerry`'s already in the
+  `www-data` group that file is readable by, no permission change needed).
+  Gerry asked for **request-then-approve**, not open self-registration: a
+  prospective user submits their own CAP ID/name/email
+  (`frontend/request-access.html` -> `POST /api/registration/request`); an
+  admin account (new `User.is_admin`, nobody starts with it except Gerry's own
+  CAP ID 530673, set by the new one-off `scripts/grant_admin.py`) reviews
+  pending requests (`frontend/admin-requests.html`) and approves or denies.
+  Only on approval does the requester get a one-time emailed link
+  (`RegistrationRequest.setup_token`, 48h expiry, single-use) to
+  `frontend/complete-setup.html`, where **they** set their own password and
+  enroll their own TOTP -- Gerry never sees or types anyone else's password,
+  unlike the still-present `scripts/create_user.py` CLI flow (kept for a
+  one-off account Gerry wants to create directly, not removed).
+  - **Email sending -- revised same day.** First version read SMTP
+    host/user/password from AvTrack's own `.env`, deliberately avoiding any
+    runtime dependency on WxCOP's system config. Superseded once it was
+    confirmed that's unnecessary: `/etc/msmtprc`'s ACL already grants `gerry`
+    read (`user:gerry:r--`), `avtrack-backend.service` already runs as
+    `User=gerry`, and WxCOP's own alert scripts
+    (`/var/www/cap_winds_app/scripts/{wxcop_freshness_monitor,
+    mef_cluster_outlook}.py`) already shell out to `msmtp -a gmail <recipient>`
+    for exactly this. `app/email.py` now does the same -- zero new secrets
+    anywhere, no credential in AvTrack's `.env` at all. Verified live with a
+    real one-off test send (genuine `250 OK` from Gmail) before wiring it into
+    any route, then again end-to-end through the real request/approve flow.
+    Known, deliberate tradeoff: AvTrack's account-request emails now come from
+    the same address used for official CAP WxCOP alerting, and AvTrack (no
+    app-level auth of its own protecting this relay) gets send-as access to
+    it -- accepted as fine given same owner/host and the permissions already
+    allow it; a separate Gmail account/app password remains a clean escape
+    hatch later if that changes. `admin_notification_emails`/`public_base_url`
+    are still AvTrack's own `.env` settings (nothing to read from WxCOP for
+    those). `send_email()` still runs via `asyncio.to_thread()` --
+    `subprocess.run()` blocks, and per this session's own event-loop-blocking
+    lesson (`app/api/airfields.py`'s fix), nothing should block the shared
+    event loop the ADS-B poll loops also run on.
+  - The TOTP QR code is returned as a `data:image/png;base64,...` string
+    embedded directly in the setup-completion response (via the already-
+    installed `qrcode` package), not a separate image route -- a separate
+    route would need to stay valid *after* `setup_completed_at` is set to be
+    fetchable, directly conflicting with the token's own single-use/expiry
+    check.
+  - **Verified live end-to-end** with disposable accounts/requests: submit ->
+    401 unauthenticated on admin routes -> 403 for a logged-in non-admin ->
+    200 listing/approving as an admin -> setup link completes and creates a
+    real `User` -> fresh login with the new account succeeds -> the same setup
+    token 404s on reuse. All disposable users/sessions/requests deleted
+    afterward and reconfirmed by direct query (watch the FK order: delete
+    `RegistrationRequest` rows, which reference `reviewed_by_user_id`, before
+    the admin `User` row that approved them -- hit this exact ordering
+    mistake live, transaction rolled back cleanly, nothing was lost).
+  - **Observed, not yet root-caused**: one `avtrack-backend` restart during
+    this work took ~90s to stop and was eventually SIGKILLed by systemd
+    (`State 'final-sigterm' timed out`) before starting cleanly on retry --
+    service recovered fine and `Restart=always` covers it either way, but
+    worth watching for a recurrence; didn't block this work so wasn't chased
+    further.
+- **Email domain restriction + admin exception path, same day.** Per Gerry:
+  "Users attempting to register should have a cap.gov or capnhq.gov email
+  address. For exceptions, I need a way to register them." `POST
+  /api/registration/request` now rejects (422) any email whose domain isn't
+  exactly `cap.gov` or `capnhq.gov` (`_email_domain_allowed()` -- exact match
+  on the part after `@`, not `endswith`, so `notcap.gov` or
+  `evilcap.gov.example.com` can't slip through). New admin-only `POST
+  /api/registration/admin-create` is the exception mechanism: same
+  `RegistrationRequestIn` body, deliberately skips the domain check (an admin
+  explicitly vouching for the person *is* the exception), and immediately
+  approves rather than leaving a separate pending step -- an admin creating it
+  already is the approval. Shares its approve/email/setup-link logic with the
+  regular approve route via a new `_approve_and_notify()` helper rather than
+  duplicating it. Surfaced on `admin-requests.html` as a collapsed "Register
+  someone without a cap.gov/capnhq.gov email (exception)" form.
+  - **Verified live**: a `gmail.com` submission correctly 422s with a clear
+    message pointing at the exception path; a `capnhq.gov` submission
+    succeeds; a domain-trick address (`notcap.gov`) correctly still 422s;
+    unauthenticated and non-admin calls to `admin-create` correctly 401/403.
+  - **Not independently verified**: the `admin-create` success path itself (an
+    admin actually using the exception form) wasn't exercised by an automated
+    test call -- Claude Code's own safety classifier declined that specific
+    action ("Real-World Transactions"), appropriately, since scripting a
+    bypass-privileged account-creation action isn't something that should run
+    unattended even against disposable data. It reuses the exact same
+    `_approve_and_notify()` path already verified end-to-end via the regular
+    approve route, so confidence is high, but **Gerry should personally run
+    the exception form once for real before relying on it.**
+- **Startup DB-connection retry/backoff, 2026-11-11.** Root-caused the
+  "Observed, not yet root-caused" restart issue above, in light of a real
+  incident: a power failure took down both r815 and data2 for several days;
+  once power was repaired and r815 came back up (data2 roughly an hour
+  earlier), `avtrack-backend`'s very first DB connection attempt at startup
+  (`app/db.py`'s `init_db()`) failed with a transient `asyncio.CancelledError`
+  out of asyncpg/uvloop's own connect path -- and since Python 3.8,
+  `CancelledError` inherits from `BaseException`, not `Exception`, specifically
+  so broad `except Exception` clauses don't accidentally swallow task
+  cancellation, which meant nothing here was catching it. Any failure crashed
+  the whole process outright; `Restart=always` then just re-launched it from
+  scratch roughly every 60s, 29 times, burning ~32 minutes before cross-host
+  connectivity to data2 happened to settle (`avtrack-cap-discovery.service`
+  failed the same way in the same window, confirming a shared environmental
+  cause, not a bug in either service's own code). r815's daily reboot (the
+  original reason this unit's `Restart=always` existed) turned out to no
+  longer be happening per Gerry -- this was a one-off power event, but the
+  same startup-crash exposure would recur after any future power loss,
+  hardware hiccup, or data2 restart regardless of cause.
+  - `init_db()` now retries in-process on `(OSError, asyncio.TimeoutError,
+    asyncio.CancelledError, OperationalError)` with real backoff (2/4/8/15/30s,
+    12 attempts, ~4 minutes total) before giving up and letting the process
+    exit (systemd's `Restart=always` remains the outer safety net for a
+    longer-than-4-minute outage). Avoids tearing down and respawning the whole
+    app on every transient blip, logs a clear warning per attempt instead of a
+    raw traceback, and -- the part that actually mattered here -- explicitly
+    catches `CancelledError`, which a naive `except Exception` would have
+    missed entirely.
+  - **Verified live**: an isolated test script (own engine pointed at an
+    unused LAN address, well outside the real app/database, shrunk backoff for
+    speed) confirmed the loop retries with growing delay and the expected log
+    messages, then raises cleanly after exhausting attempts. Separately
+    restarted the real `avtrack-backend` against the real, reachable data2 and
+    confirmed the happy path is unaffected -- no retry warnings logged, starts
+    the same as before. Did **not** test against the real production DB
+    connection by deliberately blocking it (Claude Code's own safety
+    classifier declined that specific action, "Interfere With Workloads" --
+    appropriately, since deliberately cutting a live service's DB connection
+    is a real disruptive action on shared infrastructure, not something to
+    script unattended even for a good reason).
 
 ## 4. UX Philosophy (per Gerry, 2026-09-13)
 

@@ -3,25 +3,29 @@
 # from the live feed to populate the background list... let's start a multi-day
 # capture... you can set up a timed task to accomplish this. That said, r815
 # reboots daily at 0700 UTC so you might have to restart that task after the
-# reboot." Restart=always + WantedBy=multi-user.target handles both the crash
-# case and the reboot case -- same reasoning as avtrack-backend.service (that
-# one already caused a real outage from being started manually via nohup
-# instead of a real unit; this one is set up correctly from the start).
+# reboot." (r815 no longer reboots daily, per Gerry 2026-11-10 -- that specific
+# reason is stale, but Restart=always + WantedBy=multi-user.target is still the
+# right call regardless of reboot cadence: it handles both the crash case and
+# any future reboot, same reasoning as avtrack-backend.service -- that one
+# already caused a real outage from being started manually via nohup instead
+# of a real unit; this one is set up correctly from the start.)
 #
-# Runs on cosp1 (where the backend/DB already are), not r815 -- the daily
-# reboot Gerry mentioned is r815's, not this host's, but the same lesson
-# (systemd, not nohup) applies regardless of which box it's on.
+# Moved from cosp1 to r815 2026-11-01 (REQUIREMENTS.md), alongside the backend --
+# this needs the venv/code, which is what actually moved; the database it writes
+# to is on data2 regardless of which host runs this script (see DATABASE_URL in
+# .env), so there's no local Postgres dependency here either. Restart=always +
+# WantedBy=multi-user.target covers any crash or reboot, same as
+# avtrack-backend.service.
 #
-# Install (one-time, on cosp1):
+# Install (one-time, on r815):
 #   sudo cp avtrack-cap-discovery.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now avtrack-cap-discovery
 
 [Unit]
 Description=AvTrack passive CAP callsign/tail discovery (adsb.lol grid sweep)
-After=network-online.target postgresql.service
+After=network-online.target
 Wants=network-online.target
-Requires=postgresql.service
 
 [Service]
 Type=simple
