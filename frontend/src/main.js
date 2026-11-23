@@ -299,6 +299,7 @@ map.on("load", () => {
   mapStyleReady = true;
   registerAirfieldTierBadges();
   registerObstructionIcons();
+  registerNavaidIcons();
 });
 
 // Aviation Chart mode (set true by the "aviation" option below) swaps the
@@ -3101,6 +3102,122 @@ const NAVAID_COLOR = {
   "FAN MARKER": "#999",
 };
 
+// NavAid icon shapes (per Gerry, 2026-11-23: "A circle is confusing vs an
+// airfield") -- pulled from the real FAA Chart Users' Guide VFR Symbology
+// section (RADIO AIDS TO NAVIGATION, pg. 25 of the 2026-07-09 edition):
+// VOR-family NAVAIDs are a hexagon with a center dot, DME-equipped ones get
+// side tabs, plain DME/TACAN is a square, and NDB-family is a dotted
+// "coverage" ring. Simplified for legibility at marker scale, but the shape
+// vocabulary (hexagon=VOR, square=DME/TACAN, dotted circle=NDB) matches the
+// chart so it reads the same way a sectional does -- and none of them are a
+// plain filled circle, which airfields already own.
+const NAVAID_ICON = {
+  VORTAC: "navaid-vortac",
+  "VOR/DME": "navaid-vordme",
+  VOR: "navaid-vor",
+  TACAN: "navaid-tacan",
+  NDB: "navaid-ndb",
+  "NDB/DME": "navaid-ndb",
+  "MARINE NDB": "navaid-ndb",
+  DME: "navaid-dme",
+  VOT: "navaid-dme",
+  "FAN MARKER": "navaid-dme",
+};
+
+function hexagonPath(ctx, cx, cy, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const angle = (Math.PI / 180) * (60 * i - 90);
+    const x = cx + r * Math.cos(angle);
+    const y = cy + r * Math.sin(angle);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function makeNavaidCanvas(shape, color, filled) {
+  const size = 24;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  const cx = size / 2,
+    cy = size / 2;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+
+  if (shape === "hexagon" || shape === "hexagon-dme") {
+    const r = 8;
+    hexagonPath(ctx, cx, cy, r);
+    if (filled) {
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+    if (shape === "hexagon-dme") {
+      // Side tabs -- echoes the real VOR-DME chart symbol (hexagon inside a
+      // circle); tabs read better than a full circle at this pixel scale.
+      ctx.beginPath();
+      ctx.moveTo(cx - r - 5, cy);
+      ctx.lineTo(cx - r + 1, cy);
+      ctx.moveTo(cx + r - 1, cy);
+      ctx.lineTo(cx + r + 5, cy);
+      ctx.stroke();
+    }
+  } else if (shape === "square") {
+    const s = 9;
+    if (filled) ctx.fillRect(cx - s / 2, cy - s / 2, s, s);
+    ctx.strokeRect(cx - s / 2, cy - s / 2, s, s);
+  } else if (shape === "dashed-circle") {
+    const r = 8;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(cx, cy, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return canvas;
+}
+
+// [id, shape, color, filled, legend label] -- single source of truth shared
+// between the map's addImage() icons and the on-page legend below, so the
+// two can never drift out of sync with each other.
+const NAVAID_ICON_SPECS = [
+  ["navaid-vortac", "hexagon", NAVAID_COLOR.VORTAC, true, "VORTAC"],
+  ["navaid-vordme", "hexagon-dme", NAVAID_COLOR["VOR/DME"], false, "VOR/DME"],
+  ["navaid-vor", "hexagon", NAVAID_COLOR.VOR, false, "VOR"],
+  ["navaid-tacan", "square", NAVAID_COLOR.TACAN, true, "TACAN"],
+  ["navaid-ndb", "dashed-circle", NAVAID_COLOR.NDB, false, "NDB / NDB-DME"],
+  ["navaid-dme", "square", NAVAID_COLOR.DME, false, "DME / VOT / Fan Marker"],
+];
+
+function registerNavaidIcons() {
+  for (const [id, shape, color, filled] of NAVAID_ICON_SPECS) {
+    if (!map.hasImage(id)) map.addImage(id, makeNavaidCanvas(shape, color, filled).getContext("2d").getImageData(0, 0, 24, 24));
+  }
+  buildNavaidLegend();
+}
+
+function buildNavaidLegend() {
+  const el = document.getElementById("navaids-legend");
+  if (!el || el.childElementCount) return; // build once
+  el.innerHTML = NAVAID_ICON_SPECS.map(
+    ([id, shape, color, filled, label]) =>
+      `<div style="display:flex;align-items:center;gap:5px;margin:1px 0;">` +
+      `<img src="${makeNavaidCanvas(shape, color, filled).toDataURL()}" width="14" height="14" style="flex-shrink:0;" />` +
+      `<span>${label}</span></div>`,
+  ).join("");
+}
+
 function nasrBoundsParam() {
   const b = map.getBounds();
   return `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
@@ -3153,7 +3270,7 @@ async function refreshNavaidsFixes() {
         type: "Feature",
         geometry: { type: "Point", coordinates: [n.lon, n.lat] },
         properties: {
-          color: NAVAID_COLOR[n.nav_type] || "#555",
+          icon: NAVAID_ICON[n.nav_type] || "navaid-dme",
           label: `${n.nav_id} — ${n.nav_type}${n.name ? " (" + n.name + ")" : ""}${n.freq ? " " + n.freq : ""}`,
           minZoom: navaidMinZoom(n.nav_type, n.alt_code),
         },
@@ -3166,14 +3283,12 @@ async function refreshNavaidsFixes() {
       map.addSource("nasr-navaids", { type: "geojson", data: navGeojson });
       map.addLayer({
         id: "nasr-navaids-layer",
-        type: "circle",
+        type: "symbol",
         source: "nasr-navaids",
-        paint: {
-          "circle-radius": 6,
-          "circle-color": ["get", "color"],
-          "circle-opacity": 0.25,
-          "circle-stroke-color": ["get", "color"],
-          "circle-stroke-width": 2,
+        layout: {
+          "icon-image": ["get", "icon"],
+          "icon-size": 1,
+          "icon-allow-overlap": true,
         },
       });
       map.on("click", "nasr-navaids-layer", (e) => {

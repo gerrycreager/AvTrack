@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AvTrack</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#14181c" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <script>if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js', {scope: '/'}); }</script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
   <style>
     /* overflow: hidden here is load-bearing, not cosmetic -- found live 2026-10-25:
@@ -415,6 +419,7 @@
     <h3>Aviation Detail</h3>
     <label><input type="checkbox" id="navaids-toggle" /> NavAids / Fixes</label>
     <div id="navaids-status" style="font-size:10px;color:#9aa4ad;min-height:12px;"></div>
+    <div id="navaids-legend" style="font-size:10px;color:#c0c6cc;margin:2px 0 4px 4px;"></div>
     <label><input type="checkbox" id="obstructions-toggle" /> Obstructions (Towers)</label>
     <div id="obstructions-status" style="font-size:10px;color:#9aa4ad;min-height:12px;"></div>
     <div class="divider"></div>
