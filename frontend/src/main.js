@@ -3106,6 +3106,33 @@ function nasrBoundsParam() {
   return `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
 }
 
+// NavAid zoom tiering (per Gerry, 2026-11-23): "Prioritize HIGH VORTAC on 0-3
+// and then start bringing in more, including the low altitude NAVAIDs at
+// higher zoom levels" -- same density-pacing principle as the airfield tiers
+// above (TIER_MIN_ZOOM), driven by FAA's own ALT_CODE field on nasr.navaids
+// (backfilled 2026-11-23 from NAV_BASE.csv -- see
+// [[project_nasr_schema_table_ownership]] for why that needed a one-time
+// ALTER run as postgres). VH/H = high altitude, VL/L = low altitude, T =
+// terminal; blank for the navaid types that don't carry one at all
+// (NDB/NDB-DME/DME/VOT/FAN MARKER/MARINE NDB), which fall into the lowest,
+// most-numerous tier alongside Terminal-class VOR/VORTAC/VOR-DME and TACAN
+// (no altitude structure of its own, but a primary aid -- grouped with the
+// Terminal tier rather than the bottom one). Applied the same way the
+// airfield dot layer is: precomputed per-feature, gated via setFilter on
+// every bbox refresh rather than re-fetching per tier (NavAids is a single
+// ~1.5k-row nationwide table -- cheap enough to fetch once and filter
+// client-side, unlike the ~22k-row airfields table airfieldsRequestId/
+// max_tier was built to avoid over-fetching).
+function navaidMinZoom(navType, altCode) {
+  const alt = (altCode || "").toUpperCase();
+  const isVorFamily = navType === "VORTAC" || navType === "VOR/DME" || navType === "VOR";
+  if (navType === "VORTAC" && (alt === "H" || alt === "VH")) return 0;
+  if (isVorFamily && (alt === "H" || alt === "VH")) return 3;
+  if (isVorFamily && (alt === "L" || alt === "VL")) return 6;
+  if ((isVorFamily && alt === "T") || navType === "TACAN") return 8;
+  return NASR_FIX_MIN_ZOOM; // NDB/NDB-DME/DME/VOT/FAN MARKER/Marine NDB -- full detail only
+}
+
 // ── NavAids + Fixes ──────────────────────────────────────────────────────────
 let navaidsFixesRequestId = 0;
 
@@ -3128,6 +3155,7 @@ async function refreshNavaidsFixes() {
         properties: {
           color: NAVAID_COLOR[n.nav_type] || "#555",
           label: `${n.nav_id} — ${n.nav_type}${n.name ? " (" + n.name + ")" : ""}${n.freq ? " " + n.freq : ""}`,
+          minZoom: navaidMinZoom(n.nav_type, n.alt_code),
         },
       })),
     };
@@ -3152,6 +3180,7 @@ async function refreshNavaidsFixes() {
         new maplibregl.Popup().setLngLat(e.lngLat).setHTML(e.features[0].properties.label).addTo(map);
       });
     }
+    map.setFilter("nasr-navaids-layer", ["<=", ["get", "minZoom"], zoom]);
 
     let fixCount = 0;
     if (zoom >= NASR_FIX_MIN_ZOOM) {
@@ -3194,8 +3223,10 @@ async function refreshNavaidsFixes() {
     }
 
     if (statusEl) {
-      statusEl.textContent =
-        `${navData.count || 0} navaids` + (zoom >= NASR_FIX_MIN_ZOOM ? ` · ${fixCount} fixes` : " · zoom in for fixes");
+      const shownNavaids = navGeojson.features.filter((f) => f.properties.minZoom <= zoom).length;
+      const navaidsLabel =
+        shownNavaids < navGeojson.features.length ? `${shownNavaids}/${navGeojson.features.length} navaids` : `${shownNavaids} navaids`;
+      statusEl.textContent = navaidsLabel + (zoom >= NASR_FIX_MIN_ZOOM ? ` · ${fixCount} fixes` : " · zoom in for fixes");
     }
   } catch (err) {
     console.error("Failed to load NavAids/Fixes", err);
@@ -3370,9 +3401,24 @@ function loadClassAirspace(callback) {
 // 2026-11-23: MapLibre rejects line-dasharray as a data expression ("data
 // expressions not supported"), so a single per-class `match` on CLASS can't
 // drive the dash pattern; each class's dasharray has to be a plain literal on
-// its own layer instead.
+// its own layer instead. Also split the fill (originally one combined
+// "class-bcd-fill") the same way, since each class now needs its own native
+// `minzoom` -- MapLibre's `minzoom` is a per-layer property, not something a
+// filter/paint expression can vary by CLASS within one layer.
+//
+// Zoom floors (per Gerry, 2026-11-23): "Class B airspace at CONUS-level zoom,
+// then, progressively, C and D" -- same density-pacing logic as the airfield
+// tiers and NavAids above, applied to controlled airspace. Class B (the ~37
+// major-hub rings) is sparse enough to show at the map's zoom-3.2 startup
+// view; C and D step in a few zoom levels apart so each step reveals
+// something new rather than dumping all ~700 D rings in at once. Class E
+// (surface extensions at *any* towered field, by far the most numerous) gets
+// the latest floor, matching NavAids'/Fixes' "full detail" zoom.
+const CLASS_BCD_MIN_ZOOM = { B: 0, C: 4, D: 6 };
+const CLASS_E_MIN_ZOOM = 8;
+const CLASS_BCD_FILL_IDS = ["class-b-fill", "class-c-fill", "class-d-fill"];
 const CLASS_BCD_LINE_IDS = ["class-b-line", "class-c-line", "class-d-line"];
-const CLASS_ALL_LAYER_IDS = ["class-bcd-fill", ...CLASS_BCD_LINE_IDS, "class-e-line"];
+const CLASS_ALL_LAYER_IDS = [...CLASS_BCD_FILL_IDS, ...CLASS_BCD_LINE_IDS, "class-e-line"];
 
 let classAirspaceLayersReady = false;
 let classAirspaceLayersBuilding = false;
@@ -3400,21 +3446,38 @@ function ensureClassAirspaceLayers() {
   loadClassAirspace((data) => {
     map.addSource("class-airspace", { type: "geojson", data });
     map.addLayer({
-      id: "class-bcd-fill",
+      id: "class-b-fill",
       type: "fill",
       source: "class-airspace",
-      filter: ["in", ["get", "CLASS"], ["literal", ["B", "C", "D"]]],
+      filter: ["==", ["get", "CLASS"], "B"],
+      minzoom: CLASS_BCD_MIN_ZOOM.B,
       layout: { visibility: "none" },
-      paint: {
-        "fill-color": "#0046dc",
-        "fill-opacity": ["match", ["get", "CLASS"], "B", 0.06, "C", 0.05, "D", 0.04, 0.04],
-      },
+      paint: { "fill-color": "#0046dc", "fill-opacity": 0.06 },
+    });
+    map.addLayer({
+      id: "class-c-fill",
+      type: "fill",
+      source: "class-airspace",
+      filter: ["==", ["get", "CLASS"], "C"],
+      minzoom: CLASS_BCD_MIN_ZOOM.C,
+      layout: { visibility: "none" },
+      paint: { "fill-color": "#0046dc", "fill-opacity": 0.05 },
+    });
+    map.addLayer({
+      id: "class-d-fill",
+      type: "fill",
+      source: "class-airspace",
+      filter: ["==", ["get", "CLASS"], "D"],
+      minzoom: CLASS_BCD_MIN_ZOOM.D,
+      layout: { visibility: "none" },
+      paint: { "fill-color": "#0046dc", "fill-opacity": 0.04 },
     });
     map.addLayer({
       id: "class-b-line",
       type: "line",
       source: "class-airspace",
       filter: ["==", ["get", "CLASS"], "B"],
+      minzoom: CLASS_BCD_MIN_ZOOM.B,
       layout: { visibility: "none" },
       paint: { "line-color": "#0046dc", "line-width": 2, "line-opacity": 0.9 },
     });
@@ -3423,6 +3486,7 @@ function ensureClassAirspaceLayers() {
       type: "line",
       source: "class-airspace",
       filter: ["==", ["get", "CLASS"], "C"],
+      minzoom: CLASS_BCD_MIN_ZOOM.C,
       layout: { visibility: "none" },
       paint: { "line-color": "#0046dc", "line-width": 1.5, "line-dasharray": [8, 4], "line-opacity": 0.8 },
     });
@@ -3431,6 +3495,7 @@ function ensureClassAirspaceLayers() {
       type: "line",
       source: "class-airspace",
       filter: ["==", ["get", "CLASS"], "D"],
+      minzoom: CLASS_BCD_MIN_ZOOM.D,
       layout: { visibility: "none" },
       paint: { "line-color": "#0046dc", "line-width": 1, "line-dasharray": [4, 4], "line-opacity": 0.7 },
     });
@@ -3439,6 +3504,7 @@ function ensureClassAirspaceLayers() {
       type: "line",
       source: "class-airspace",
       filter: ["==", ["get", "CLASS"], "E"],
+      minzoom: CLASS_E_MIN_ZOOM,
       layout: { visibility: "none" },
       paint: { "line-color": "#787800", "line-width": 1, "line-dasharray": [1, 2], "line-opacity": 0.5 },
     });
@@ -3456,9 +3522,10 @@ function ensureClassAirspaceLayers() {
 function applyClassAirspaceVisibility() {
   const bcdOn = document.getElementById("class-bcd-toggle").checked;
   const eOn = document.getElementById("class-e-toggle").checked;
-  if (map.getLayer("class-bcd-fill")) {
-    map.setLayoutProperty("class-bcd-fill", "visibility", bcdOn ? "visible" : "none");
-    for (const id of CLASS_BCD_LINE_IDS) map.setLayoutProperty(id, "visibility", bcdOn ? "visible" : "none");
+  if (map.getLayer("class-b-fill")) {
+    for (const id of [...CLASS_BCD_FILL_IDS, ...CLASS_BCD_LINE_IDS]) {
+      map.setLayoutProperty(id, "visibility", bcdOn ? "visible" : "none");
+    }
   }
   if (map.getLayer("class-e-line")) {
     map.setLayoutProperty("class-e-line", "visibility", eOn ? "visible" : "none");
@@ -3481,7 +3548,12 @@ const AVIATION_CROSSOVER_ZOOM = 12;
 let aviationModeActive = false;
 
 function setAviationOverlays(show) {
-  for (const id of ["navaids-toggle", "class-bcd-toggle", "class-e-toggle", "obstructions-toggle"]) {
+  // NavAids deliberately excluded (per Gerry, 2026-11-23): "NAVAIDS does not
+  // need to be default checked 'On' on any of the maps" -- it was the single
+  // biggest contributor to the full-CONUS density complaint (1513 unfiltered
+  // markers), so unlike Class B/C/D/E and Obstructions, it now stays off
+  // unless the user explicitly checks it, even in aviation mode.
+  for (const id of ["class-bcd-toggle", "class-e-toggle", "obstructions-toggle"]) {
     const el = document.getElementById(id);
     if (el.checked !== show) {
       el.checked = show;
