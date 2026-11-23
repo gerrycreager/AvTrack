@@ -298,10 +298,29 @@ let mapStyleReady = false;
 map.on("load", () => {
   mapStyleReady = true;
   registerAirfieldTierBadges();
+  registerObstructionIcons();
 });
 
+// Aviation Chart mode (set true by the "aviation" option below) swaps the
+// topo/sectional pair itself based on zoom -- see applyAviationLayer() --
+// so this plain-selection handler only runs for the other, non-crossover
+// basemap choices.
 document.getElementById("basemap-select").addEventListener("change", (e) => {
   const selected = e.target.value;
+  if (selected === "aviation") {
+    aviationModeActive = true;
+    for (const [key, cfg] of Object.entries(BASEMAPS)) {
+      map.setLayoutProperty(`basemap-${key}-layer`, "visibility", "none");
+      (cfg.overlays ?? []).forEach((_, i) => map.setLayoutProperty(`basemap-${key}-overlay-${i}-layer`, "visibility", "none"));
+    }
+    const wantSectional = map.getZoom() >= AVIATION_CROSSOVER_ZOOM;
+    map.setLayoutProperty("basemap-topo-layer", "visibility", wantSectional ? "none" : "visible");
+    map.setLayoutProperty("basemap-sectional-layer", "visibility", wantSectional ? "visible" : "none");
+    setAviationOverlays(!wantSectional);
+    return;
+  }
+  aviationModeActive = false;
+  setAviationOverlays(false);
   for (const [key, cfg] of Object.entries(BASEMAPS)) {
     const visible = key === selected;
     map.setLayoutProperty(`basemap-${key}-layer`, "visibility", visible ? "visible" : "none");
@@ -3047,6 +3066,445 @@ document.getElementById("gis-upload-btn").addEventListener("click", async () => 
   await refreshGisLayerList();
 });
 
+// ── Aviation Chart: NASR NavAids/Fixes, Class Airspace, Obstructions, and the
+// zoom-resolving VFR Sectional crossover -- ported from CAP_WxCOP's EWMC/
+// Flight Ops Impacts pages (enhanced_weather_map_complete.html /
+// weather_impacts.html on r815) per Gerry 2026-11-23: "We need the same logic
+// and mapping for AvTrack and Flight Impacts... take it to Zoom 12." AvTrack
+// already has its own airfield layer (a different, CAP-specific dataset and
+// tiering -- see app/api/airfields.py's own docstring) -- that's untouched;
+// this only adds what AvTrack didn't have at all: NavAids, Fixes, Class
+// Airspace, Obstructions, and the vector-to-raster crossover itself. Fetched
+// cross-origin from the CAP_WxCOP host (same absolute-URL reasoning as
+// BASEMAPS.sectional above -- a relative path would resolve against AvTrack's
+// own origin and 404); CORS enabled server-side for these specific paths
+// 2026-11-23 (see /etc/apache2/sites-enabled/cap_winds.conf and
+// conf-available/mapcache.conf).
+const CAP_WXCOP_ORIGIN = "https://wxcop.duckdns.org";
+const NASR_NAVAIDS_API = `${CAP_WXCOP_ORIGIN}/CAP_WxCOP/api/nasr/navaids`;
+const NASR_FIXES_API = `${CAP_WXCOP_ORIGIN}/CAP_WxCOP/api/nasr/fixes`;
+const NASR_OBSTRUCTIONS_API = `${CAP_WXCOP_ORIGIN}/CAP_WxCOP/api/nasr/obstructions`;
+const CLASS_AIRSPACE_URL = `${CAP_WXCOP_ORIGIN}/CAP_WxCOP/static/geo/class_airspace.geojson`;
+const NASR_FIX_MIN_ZOOM = 10;
+const OBSTRUCTIONS_MIN_ZOOM = 10;
+
+const NAVAID_COLOR = {
+  VOR: "#1565c0",
+  "VOR/DME": "#1565c0",
+  VORTAC: "#00838f",
+  TACAN: "#00838f",
+  NDB: "#8e24aa",
+  "NDB/DME": "#8e24aa",
+  "MARINE NDB": "#8e24aa",
+  DME: "#555",
+  VOT: "#555",
+  "FAN MARKER": "#999",
+};
+
+function nasrBoundsParam() {
+  const b = map.getBounds();
+  return `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`;
+}
+
+// ── NavAids + Fixes ──────────────────────────────────────────────────────────
+let navaidsFixesRequestId = 0;
+
+async function refreshNavaidsFixes() {
+  if (!document.getElementById("navaids-toggle").checked) return;
+  const requestId = ++navaidsFixesRequestId;
+  const bp = nasrBoundsParam();
+  const zoom = map.getZoom();
+  const statusEl = document.getElementById("navaids-status");
+
+  try {
+    const navRes = await fetch(`${NASR_NAVAIDS_API}?bounds=${bp}`);
+    const navData = await navRes.json();
+    if (requestId !== navaidsFixesRequestId) return;
+    const navGeojson = {
+      type: "FeatureCollection",
+      features: (navData.navaids || []).map((n) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [n.lon, n.lat] },
+        properties: {
+          color: NAVAID_COLOR[n.nav_type] || "#555",
+          label: `${n.nav_id} — ${n.nav_type}${n.name ? " (" + n.name + ")" : ""}${n.freq ? " " + n.freq : ""}`,
+        },
+      })),
+    };
+    const navSource = map.getSource("nasr-navaids");
+    if (navSource) {
+      navSource.setData(navGeojson);
+    } else {
+      map.addSource("nasr-navaids", { type: "geojson", data: navGeojson });
+      map.addLayer({
+        id: "nasr-navaids-layer",
+        type: "circle",
+        source: "nasr-navaids",
+        paint: {
+          "circle-radius": 6,
+          "circle-color": ["get", "color"],
+          "circle-opacity": 0.25,
+          "circle-stroke-color": ["get", "color"],
+          "circle-stroke-width": 2,
+        },
+      });
+      map.on("click", "nasr-navaids-layer", (e) => {
+        new maplibregl.Popup().setLngLat(e.lngLat).setHTML(e.features[0].properties.label).addTo(map);
+      });
+    }
+
+    let fixCount = 0;
+    if (zoom >= NASR_FIX_MIN_ZOOM) {
+      const fixRes = await fetch(`${NASR_FIXES_API}?bounds=${bp}`);
+      const fixData = await fixRes.json();
+      if (requestId !== navaidsFixesRequestId) return;
+      fixCount = fixData.count || 0;
+      const fixGeojson = {
+        type: "FeatureCollection",
+        features: (fixData.fixes || []).map((fx) => ({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [fx.lon, fx.lat] },
+          properties: { label: fx.fix_id + (fx.use_code ? ` (${fx.use_code.trim()})` : "") },
+        })),
+      };
+      const fixSource = map.getSource("nasr-fixes");
+      if (fixSource) {
+        fixSource.setData(fixGeojson);
+      } else {
+        map.addSource("nasr-fixes", { type: "geojson", data: fixGeojson });
+        map.addLayer({
+          id: "nasr-fixes-layer",
+          type: "circle",
+          source: "nasr-fixes",
+          paint: {
+            "circle-radius": 3,
+            "circle-color": "#aaa",
+            "circle-opacity": 0.6,
+            "circle-stroke-color": "#777",
+            "circle-stroke-width": 1,
+          },
+        });
+        map.on("click", "nasr-fixes-layer", (e) => {
+          new maplibregl.Popup().setLngLat(e.lngLat).setHTML(e.features[0].properties.label).addTo(map);
+        });
+      }
+    } else {
+      const fixSource = map.getSource("nasr-fixes");
+      if (fixSource) fixSource.setData({ type: "FeatureCollection", features: [] });
+    }
+
+    if (statusEl) {
+      statusEl.textContent =
+        `${navData.count || 0} navaids` + (zoom >= NASR_FIX_MIN_ZOOM ? ` · ${fixCount} fixes` : " · zoom in for fixes");
+    }
+  } catch (err) {
+    console.error("Failed to load NavAids/Fixes", err);
+  }
+}
+
+function clearNavaidsFixes() {
+  for (const id of ["nasr-navaids-layer", "nasr-fixes-layer"]) if (map.getLayer(id)) map.removeLayer(id);
+  for (const id of ["nasr-navaids", "nasr-fixes"]) if (map.getSource(id)) map.removeSource(id);
+  const statusEl = document.getElementById("navaids-status");
+  if (statusEl) statusEl.textContent = "";
+}
+
+let navaidsFixesFetchTimer = null;
+function scheduleNavaidsFixesRefresh() {
+  if (!document.getElementById("navaids-toggle").checked) return;
+  clearTimeout(navaidsFixesFetchTimer);
+  navaidsFixesFetchTimer = setTimeout(refreshNavaidsFixes, 400);
+}
+
+document.getElementById("navaids-toggle").addEventListener("change", (e) => {
+  if (e.target.checked) refreshNavaidsFixes();
+  else clearNavaidsFixes();
+});
+
+// ── Obstructions (FAA Digital Obstacle File) ────────────────────────────────
+// Triangle glyphs, matching EWMC/Flight Ops Impacts per Gerry's "triangle or
+// diamond" request there (2026-11-22) -- registered once as two addImage()
+// bitmaps (lit/unlit) rather than per-feature HTML markers, same convention
+// as registerAirfieldTierBadges() above, since this dataset is dense enough
+// (656k nationwide, ~200k at the >=200ft AGL floor the API applies by
+// default) that per-feature DOM markers would be far more expensive than one
+// shared symbol-layer image.
+function makeObstructionTriangleImage(color) {
+  const w = 20,
+    h = 22;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.beginPath();
+  ctx.moveTo(w / 2, 0);
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = color;
+  ctx.fill();
+  return ctx.getImageData(0, 0, w, h);
+}
+
+function registerObstructionIcons() {
+  if (!map.hasImage("obstruction-lit")) map.addImage("obstruction-lit", makeObstructionTriangleImage("#ff3030"));
+  if (!map.hasImage("obstruction-unlit")) map.addImage("obstruction-unlit", makeObstructionTriangleImage("#a00000"));
+}
+
+let obstructionsRequestId = 0;
+
+async function refreshObstructions() {
+  if (!document.getElementById("obstructions-toggle").checked) return;
+  const statusEl = document.getElementById("obstructions-status");
+  const zoom = map.getZoom();
+  if (zoom < OBSTRUCTIONS_MIN_ZOOM) {
+    const source = map.getSource("nasr-obstructions");
+    if (source) source.setData({ type: "FeatureCollection", features: [] });
+    if (statusEl) statusEl.textContent = "zoom in to load obstructions...";
+    return;
+  }
+  const requestId = ++obstructionsRequestId;
+  const bp = nasrBoundsParam();
+  try {
+    const res = await fetch(`${NASR_OBSTRUCTIONS_API}?bounds=${bp}`);
+    const data = await res.json();
+    if (requestId !== obstructionsRequestId) return;
+    const geojson = {
+      type: "FeatureCollection",
+      features: (data.obstructions || []).map((o) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [o.lon, o.lat] },
+        properties: {
+          lit: !!(o.lighting && o.lighting !== "N"),
+          agl_ft: o.agl_ft || 0,
+          label: `${o.obstacle_type || "Obstruction"}${o.agl_ft ? " — " + o.agl_ft + "ft AGL" : ""}${o.amsl_ft ? " (" + o.amsl_ft + "ft MSL)" : ""}`,
+        },
+      })),
+    };
+    const source = map.getSource("nasr-obstructions");
+    if (source) {
+      source.setData(geojson);
+    } else {
+      map.addSource("nasr-obstructions", { type: "geojson", data: geojson });
+      map.addLayer({
+        id: "nasr-obstructions-layer",
+        type: "symbol",
+        source: "nasr-obstructions",
+        layout: {
+          "icon-image": ["case", ["get", "lit"], "obstruction-lit", "obstruction-unlit"],
+          "icon-size": ["interpolate", ["linear"], ["get", "agl_ft"], 0, 0.4, 1200, 1.0],
+          "icon-allow-overlap": true,
+        },
+      });
+      map.on("click", "nasr-obstructions-layer", (e) => {
+        new maplibregl.Popup().setLngLat(e.lngLat).setHTML(e.features[0].properties.label).addTo(map);
+      });
+    }
+    if (statusEl) statusEl.textContent = `${data.count || 0} obstructions ≥200ft AGL`;
+  } catch (err) {
+    console.error("Failed to load Obstructions", err);
+  }
+}
+
+function clearObstructions() {
+  if (map.getLayer("nasr-obstructions-layer")) map.removeLayer("nasr-obstructions-layer");
+  if (map.getSource("nasr-obstructions")) map.removeSource("nasr-obstructions");
+  const statusEl = document.getElementById("obstructions-status");
+  if (statusEl) statusEl.textContent = "";
+}
+
+let obstructionsFetchTimer = null;
+function scheduleObstructionsRefresh() {
+  if (!document.getElementById("obstructions-toggle").checked) return;
+  clearTimeout(obstructionsFetchTimer);
+  obstructionsFetchTimer = setTimeout(refreshObstructions, 400);
+}
+
+document.getElementById("obstructions-toggle").addEventListener("change", (e) => {
+  if (e.target.checked) refreshObstructions();
+  else clearObstructions();
+});
+
+// ── Class Airspace (B/C/D controlled, E surface) ────────────────────────────
+// Static GeoJSON, same file EWMC/Flight Ops Impacts serve (already simplified
+// server-side from Esri's raw 542MB export down to 28.5MB -- see
+// scripts/update_airspace_geo.py on r815), loaded once and cached in-memory
+// like AvTrack's own loadSua()/loadMtr() pattern (if those exist elsewhere in
+// this file) rather than refetched on every toggle.
+let classAirspaceData = null;
+let classAirspaceLoading = false;
+
+function loadClassAirspace(callback) {
+  if (classAirspaceData) {
+    callback(classAirspaceData);
+    return;
+  }
+  if (classAirspaceLoading) {
+    setTimeout(() => loadClassAirspace(callback), 500);
+    return;
+  }
+  classAirspaceLoading = true;
+  const statusEl = document.getElementById("airspace-class-status");
+  if (statusEl) statusEl.textContent = "Loading…";
+  fetch(CLASS_AIRSPACE_URL)
+    .then((r) => {
+      if (!r.ok) throw new Error("Class Airspace fetch failed: " + r.status);
+      return r.json();
+    })
+    .then((data) => {
+      classAirspaceData = data;
+      classAirspaceLoading = false;
+      if (statusEl) statusEl.textContent = "";
+      callback(data);
+    })
+    .catch((err) => {
+      classAirspaceLoading = false;
+      if (statusEl) statusEl.textContent = "unavailable";
+      console.error("Class Airspace load error:", err);
+    });
+}
+
+// B/C/D get one shared fill layer (fill-opacity IS a valid data/property
+// expression) but three separate line layers, not one -- found live
+// 2026-11-23: MapLibre rejects line-dasharray as a data expression ("data
+// expressions not supported"), so a single per-class `match` on CLASS can't
+// drive the dash pattern; each class's dasharray has to be a plain literal on
+// its own layer instead.
+const CLASS_BCD_LINE_IDS = ["class-b-line", "class-c-line", "class-d-line"];
+const CLASS_ALL_LAYER_IDS = ["class-bcd-fill", ...CLASS_BCD_LINE_IDS, "class-e-line"];
+
+let classAirspaceLayersReady = false;
+let classAirspaceLayersBuilding = false;
+
+function classAirspacePopupHtml(p) {
+  const cls = (p.CLASS || "").toUpperCase();
+  const name = p.NAME || p.IDENT || "";
+  const floor = p.LOWER_CODE === "SFC" ? "SFC" : p.LOWER_VAL != null ? `${p.LOWER_VAL} ${p.LOWER_UOM || "ft"}` : "?";
+  const ceiling = p.UPPER_VAL != null ? `${p.UPPER_VAL} ${p.UPPER_UOM || "ft"}` : "?";
+  const hours = p.WKHR_CODE === "H24" ? "Continuous" : p.WKHR_RMK || "See chart/NOTAMs";
+  return `<div style="font-size:13px;min-width:180px;"><strong>${name}</strong><br><span style="color:#555;">Class ${cls}</span><br>Alt: ${floor} – ${ceiling}<br><span style="font-size:11px;">⏱ ${hours}</span></div>`;
+}
+
+function ensureClassAirspaceLayers() {
+  // Guards a real race (found live 2026-11-23): the class-bcd-toggle and
+  // class-e-toggle "change" listeners below both call this, and
+  // loadClassAirspace()'s fetch is async -- both calls passed the "source
+  // doesn't exist yet" check before either one's callback had actually run,
+  // so both tried to addSource the same id ("Source 'class-airspace' already
+  // exists"). A synchronous "building" flag closes that window; the simple
+  // `if (map.getSource(...)) return` guard alone isn't enough since the
+  // source doesn't exist until the fetch resolves.
+  if (classAirspaceLayersReady || classAirspaceLayersBuilding) return;
+  classAirspaceLayersBuilding = true;
+  loadClassAirspace((data) => {
+    map.addSource("class-airspace", { type: "geojson", data });
+    map.addLayer({
+      id: "class-bcd-fill",
+      type: "fill",
+      source: "class-airspace",
+      filter: ["in", ["get", "CLASS"], ["literal", ["B", "C", "D"]]],
+      layout: { visibility: "none" },
+      paint: {
+        "fill-color": "#0046dc",
+        "fill-opacity": ["match", ["get", "CLASS"], "B", 0.06, "C", 0.05, "D", 0.04, 0.04],
+      },
+    });
+    map.addLayer({
+      id: "class-b-line",
+      type: "line",
+      source: "class-airspace",
+      filter: ["==", ["get", "CLASS"], "B"],
+      layout: { visibility: "none" },
+      paint: { "line-color": "#0046dc", "line-width": 2, "line-opacity": 0.9 },
+    });
+    map.addLayer({
+      id: "class-c-line",
+      type: "line",
+      source: "class-airspace",
+      filter: ["==", ["get", "CLASS"], "C"],
+      layout: { visibility: "none" },
+      paint: { "line-color": "#0046dc", "line-width": 1.5, "line-dasharray": [8, 4], "line-opacity": 0.8 },
+    });
+    map.addLayer({
+      id: "class-d-line",
+      type: "line",
+      source: "class-airspace",
+      filter: ["==", ["get", "CLASS"], "D"],
+      layout: { visibility: "none" },
+      paint: { "line-color": "#0046dc", "line-width": 1, "line-dasharray": [4, 4], "line-opacity": 0.7 },
+    });
+    map.addLayer({
+      id: "class-e-line",
+      type: "line",
+      source: "class-airspace",
+      filter: ["==", ["get", "CLASS"], "E"],
+      layout: { visibility: "none" },
+      paint: { "line-color": "#787800", "line-width": 1, "line-dasharray": [1, 2], "line-opacity": 0.5 },
+    });
+    for (const id of CLASS_ALL_LAYER_IDS) {
+      map.on("click", id, (e) => {
+        new maplibregl.Popup().setLngLat(e.lngLat).setHTML(classAirspacePopupHtml(e.features[0].properties)).addTo(map);
+      });
+    }
+    classAirspaceLayersReady = true;
+    classAirspaceLayersBuilding = false;
+    applyClassAirspaceVisibility();
+  });
+}
+
+function applyClassAirspaceVisibility() {
+  const bcdOn = document.getElementById("class-bcd-toggle").checked;
+  const eOn = document.getElementById("class-e-toggle").checked;
+  if (map.getLayer("class-bcd-fill")) {
+    map.setLayoutProperty("class-bcd-fill", "visibility", bcdOn ? "visible" : "none");
+    for (const id of CLASS_BCD_LINE_IDS) map.setLayoutProperty(id, "visibility", bcdOn ? "visible" : "none");
+  }
+  if (map.getLayer("class-e-line")) {
+    map.setLayoutProperty("class-e-line", "visibility", eOn ? "visible" : "none");
+  }
+}
+
+for (const id of ["class-bcd-toggle", "class-e-toggle"]) {
+  document.getElementById(id).addEventListener("change", () => {
+    ensureClassAirspaceLayers();
+    applyClassAirspaceVisibility();
+  });
+}
+
+// ── Aviation Chart crossover (vector master layer <-> real sectional raster) ─
+// Per Gerry 2026-11-23, matching EWMC/Flight Ops Impacts exactly: zoom 12 is
+// both where a real viewport-measured crossover felt right there AND where
+// the self-hosted sectional raster's own maxNativeZoom tops out, so it only
+// engages once it actually has more detail to offer than the vector layer.
+const AVIATION_CROSSOVER_ZOOM = 12;
+let aviationModeActive = false;
+
+function setAviationOverlays(show) {
+  for (const id of ["navaids-toggle", "class-bcd-toggle", "class-e-toggle", "obstructions-toggle"]) {
+    const el = document.getElementById(id);
+    if (el.checked !== show) {
+      el.checked = show;
+      el.dispatchEvent(new Event("change"));
+    }
+  }
+}
+
+function applyAviationLayer() {
+  if (!aviationModeActive) return;
+  const wantSectional = map.getZoom() >= AVIATION_CROSSOVER_ZOOM;
+  const topoVisible = map.getLayoutProperty("basemap-topo-layer", "visibility") !== "none";
+  if (wantSectional && topoVisible) {
+    map.setLayoutProperty("basemap-topo-layer", "visibility", "none");
+    map.setLayoutProperty("basemap-sectional-layer", "visibility", "visible");
+    setAviationOverlays(false);
+  } else if (!wantSectional && !topoVisible) {
+    map.setLayoutProperty("basemap-sectional-layer", "visibility", "none");
+    map.setLayoutProperty("basemap-topo-layer", "visibility", "visible");
+    setAviationOverlays(true);
+  }
+}
+
 // ── Mission roster upload (REQUIREMENTS.md 3.1, added 2026-09-13) ───────────
 // Additive-only -- see app/api/aircraft.py upload_roster docstring. Distinct from
 // the standing monthly wing-wide import (scripts/import_callsign_tails.py, a CLI
@@ -3114,6 +3572,9 @@ map.on("zoom", renderStationPlotMarkers); // instant barb-only/full-plot tier fe
 map.on("load", refreshSua);
 map.on("moveend", scheduleSuaRefresh);
 map.on("load", refreshGisLayerList);
+map.on("moveend", scheduleNavaidsFixesRefresh);
+map.on("moveend", scheduleObstructionsRefresh);
+map.on("zoomend", applyAviationLayer);
 
 // ── Login gate + mission switcher (added 2026-10-16) ───────────────────────
 // Everything tracking-related (loadKnownAircraft/loadPersistedOpsArea/

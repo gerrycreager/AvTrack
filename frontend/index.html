@@ -385,7 +385,7 @@
       <option value="streets">Streets</option>
       <option value="imagery">Imagery</option>
       <option value="hybrid">Hybrid (Imagery + Streets)</option>
-      <option value="sectional">VFR Sectional</option>
+      <option value="aviation">Aviation Chart (resolves to Sectional)</option>
     </select>
     <label style="color:#e8eaed; font-size:12px; background:rgba(20,24,28,0.85); padding:5px 8px; border-radius:4px; margin-left:6px;">
       <input type="checkbox" id="labels-toggle" checked /> Airfield labels
@@ -405,6 +405,18 @@
     <label><input type="checkbox" id="sua-prohib-toggle" /> <span class="swatch" style="background:#cc0000;"></span>Prohibited</label>
     <label><input type="checkbox" id="sua-restrict-toggle" /> <span class="swatch" style="background:#dc6400;"></span>Restricted</label>
     <label><input type="checkbox" id="sua-moa-toggle" /> <span class="swatch" style="background:#5000c8;"></span>MOA / Warning / Alert</label>
+    <label><input type="checkbox" id="class-bcd-toggle" /> <span class="swatch" style="background:#0046dc;"></span>Class B/C/D (Controlled)</label>
+    <label><input type="checkbox" id="class-e-toggle" /> <span class="swatch" style="background:#787800;"></span>Class E (Surface)</label>
+    <div id="airspace-class-status" style="font-size:10px;color:#9aa4ad;min-height:12px;"></div>
+    <div class="divider"></div>
+    <!-- NASR NavAids/Fixes + Obstructions: see main.js "Aviation Chart" section
+         for why these are separate from the Airfield Display block above (that's
+         AvTrack's own CAP airfield roster, a different dataset). -->
+    <h3>Aviation Detail</h3>
+    <label><input type="checkbox" id="navaids-toggle" /> NavAids / Fixes</label>
+    <div id="navaids-status" style="font-size:10px;color:#9aa4ad;min-height:12px;"></div>
+    <label><input type="checkbox" id="obstructions-toggle" /> Obstructions (Towers)</label>
+    <div id="obstructions-status" style="font-size:10px;color:#9aa4ad;min-height:12px;"></div>
     <div class="divider"></div>
     <h3>Airfield Display</h3>
     <label><input type="radio" name="airfield-mode" value="tier" checked /> Default</label>
